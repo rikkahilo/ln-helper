@@ -6721,6 +6721,25 @@ const _spAt = new Map();
        还在用它们，collect 一跑就 ReferenceError,面板永远停在「正在加载缓存列表…」,
        而且语法自检看不出来(名字没了不是语法错,只有真跑起来才知道)。
        留下的 _verifyResult / biliSite 是没人用的空壳,只为"万一还有引用";要删得先全库搜一遍引用。 */
+    /* v4.9.467-扩展移植(修 bug「幽灵记录删了还在」):面板不列行的那些 meta(只有目录、0 章 0 图
+       0 字节的「幽灵记录」)平时看不见、也没有删除入口 —— 收一份交给「🗄 其他存储」区展示/删除。
+       抽成函数,是因为必须在每轮行数据建好后重算:原来只在首屏那一轮(collectLate)算一次,
+       删掉一条后 collect(false) 不重算 ⇒ 旧数组照旧渲染,那一行就一直挂着(日志却已打「已删除」)。
+       · site = 显示用的域名;· mod = 库内键的真实前缀(记录自带的 __siteKey,unPfxRec 已按"键前缀才是
+       权威"补齐)⇒ 删除时用它拼键,才不会出现"显示 www.linovelib.com、库内前缀是 linovelib.com"这种
+       拼错键、opDelExact 恒返回 ok 的静默失败。 */
+    const computePhantom = (metas, rowList) => {
+      try {
+        const _vis = new Set((rowList || []).map(r => String(r.__site || '') + '|' + String(r.id).split('|').pop()));
+        return (metas || []).filter(m => !_vis.has(String(m.__site || '') + '|' + String(m.novelId).split('|').pop()))
+          .map(m => ({
+            id: String(m.novelId).split('|').pop(),
+            site: m.__site || '',
+            mod: m.__siteKey || '',
+            title: m.title || ('未知小说 ' + String(m.novelId).split('|').pop())
+          }));
+      } catch (e) { return []; }
+    };
     // 收集一次全部展示所需数据(初次与每次刷新都走这里)
     /* v4.9.168-扩展移植(首屏骨架 v2):fast=true = "首屏这一轮",只跳过"全部归档记录"那一块(最慢的);
      书单/封面/占用/字体模型照旧跑。归档统计与跨站回填随后由 collectLate() 补上(补完原地重绘)。 */
@@ -6800,6 +6819,9 @@ const _spAt = new Map();
         for (const _k of Object.keys(ocrArcByNovel)) _arcIds[String(_k)] = (ocrArcByNovel[_k] && ocrArcByNovel[_k].title) || String(_k);
         rows = buildBookRows(metas, chapters, images, _arcIds);
         rows.forEach(r => { if (!r.cached && ocrArcByNovel[r.id]) r.size = (r.size || 0) + ocrArcByNovel[r.id].size; });
+        /* v4.9.467:每轮完整 collect 都重算幽灵记录(删除后刷新 / 20 秒自动刷新都跟着变)。
+           只在 !fast 时算:fast 轮没读 OCR 归档,"纯 OCR 归档的书"不在 rows 里,会被误判成幽灵记录。 */
+        if (!fast) phantomMetas = computePhantom(metas, rows);
         // v3.4.11:每本书附上封面缓存状态(URL/是否已缓存/大小)与缩略图源 —— 已缓存用本地对象 URL(即显、离线可用),
         //   未缓存先用远程 URL 预览(加载失败自动降级为 📕 占位)
         try {
@@ -7412,13 +7434,9 @@ if (r.coverUrl) {
       const _prev = new Map();
       for (const r of rows) _prev.set(String(r.id), r);
       rows = buildBookRows(_in.metas, _in.chapters, _in.images, _arcIds);
-      /* v4.9.185:面板不列行的那些 meta(只有目录、0 章 0 图 0 字节的「幽灵记录」)平时看不见、
-         也没有删除入口 —— 这里收一份(按 站点+裸id 配对),交给「🗄 其他存储」区展示/删除。 */
-      try {
-        const _vis = new Set(rows.map(r => String(r.__site || '') + '|' + String(r.id).split('|').pop()));
-        phantomMetas = (_in.metas || []).filter(m => !_vis.has(String(m.__site || '') + '|' + String(m.novelId).split('|').pop()))
-          .map(m => ({ id: String(m.novelId).split('|').pop(), site: m.__site || '', title: m.title || ('未知小说 ' + String(m.novelId).split('|').pop()) }));
-      } catch (e) {}
+      /* v4.9.185/v4.9.467:幽灵记录(见 computePhantom)。首屏这一轮 fast 版跳过了 OCR 归档,
+         这里归档已读齐、rows 也重建好了,正好按同一口径重算一次。 */
+      phantomMetas = computePhantom(_in.metas, rows);
       for (const r of rows) {
         const _p = _prev.get(String(r.id));
         if (_p) { r.coverUrl = _p.coverUrl; r.coverCached = _p.coverCached; r.coverSrc = _p.coverSrc; r.coverSize = _p.coverSize; }
@@ -7453,7 +7471,7 @@ if (r.coverUrl) {
       h += '<div class="esj-csubrow esj-cdim"><span>这里只是给它们一个删除入口,默认折叠;每组都写了删掉会怎样。</span></div>';
       h += _grp('👻 幽灵记录', _n(phantomMetas) + ' 条 · 只有目录、0 章正文 / 0 图的书',
         (_n(phantomMetas) ? _row('🗑 全部删除(' + _n(phantomMetas) + ' 条)', 'meta-all', '全部删除', '删掉这些只有目录的幽灵记录') : '') +
-        _items(phantomMetas, (m) => _row(escHtml(m.title) + ' <span class="esj-cdim">' + escHtml(m.site || '本机') + ' · ' + escHtml(m.id) + '</span>', 'meta|' + m.site + '~' + m.id, '删除', '删掉这条幽灵记录')) +
+        _items(phantomMetas, (m) => _row(escHtml(m.title) + ' <span class="esj-cdim">' + escHtml(m.site || '本机') + ' · ' + escHtml(m.id) + '</span>', 'meta|' + (m.mod || '') + '~' + m.id, '删除', '删掉这条幽灵记录')) +
         (_n(phantomMetas) ? '' : '<div class="esj-csubrow esj-cdim"><span>没有</span></div>') +
         '<div class="esj-csubrow esj-cdim"><span>删除后果:这本书的目录没了;下次在它所属站点选章抓取时会重新解析详情页重建目录 —— 已经抓到的正文一章都不会少。</span></div>');
       h += _grp('🧱 站点老库残留', _n(othLegacy) + ' 个 · 油猴版留下的旧库(没用过油猴版就没有)',
@@ -7727,7 +7745,7 @@ if (r.coverUrl) {
             log('已删除幽灵记录 ' + _p[1]);
           } else if (_kind === 'meta-all') {
             if (!window.confirm('删除全部 ' + phantomMetas.length + ' 条「幽灵记录」?\n它们只有目录、没有正文;下次在对应站点选章抓取时会重新解析详情页建目录。')) { ob.disabled = false; return; }
-            for (const m of phantomMetas) { try { await LN_STORE.delMetaExact(m.site, m.id); } catch (e) {} }
+            for (const m of phantomMetas) { try { await LN_STORE.delMetaExact(m.mod || '', m.id); } catch (e) {} }
             log('已删除全部幽灵记录');
           } else if (_kind === 'legacy') {
             if (!window.confirm('删除站点老库 ' + _arg + '?\n里面的数据已经搬进统一库,删掉只是回收空间;若那个站点还有没搬过来的数据,下次打开它的面板会重新扫一遍。')) { ob.disabled = false; return; }
