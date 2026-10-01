@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "轻小说助手",
-  "version": "1.1.101",
+  "version": "1.1.102",
   "description": "多站轻小说抓取·阅读·翻译：抓正文与插图、EPUB/PDF 导出、内置阅读器、AI 翻译、OCR，数据本地统一书库。",
   "minimum_chrome_version": "109",
   "content_security_policy": {
