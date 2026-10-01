@@ -1,0 +1,65 @@
+{
+  "manifest_version": 3,
+  "name": "轻小说助手",
+  "version": "1.1.101",
+  "description": "多站轻小说抓取·阅读·翻译：抓正文与插图、EPUB/PDF 导出、内置阅读器、AI 翻译、OCR，数据本地统一书库。",
+  "minimum_chrome_version": "109",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "offscreen",
+    "scripting",
+    "declarativeNetRequest"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_title": "轻小说助手:缓存管理 / 设置 / 版本信息",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "sw.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.esjzone.cc/*",
+        "https://www.esjzone.one/*",
+        "https://www.linovelib.com/*",
+        "https://ncode.syosetu.com/*",
+        "https://novel18.syosetu.com/*",
+        "https://kakuyomu.jp/*",
+        "https://www.bilinovel.com/*",
+        "https://n.novelia.cc/*",
+        "https://www.wenku8.net/*",
+        "https://www.alicesw.com/*"
+      ],
+      "js": [
+        "lib/fflate.js",
+        "lib/ln-pre.js",
+        "lib/ort.wasm.min.js",
+        "lib/eSearchOCR.umd.js",
+        "gm-shim.js",
+        "ln-codec.js",
+        "ln-store.js",
+        "ln-main.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "lib/ort.wasm.min.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+# 开发台账与快照（不上传）
+历史开发记录/
+
+# 发布副本与打包产物
+dist/
+*.zip
+
+# 备份快照
+*.bak-*.js
+
+# 本地预览 / 测试页
+test_render.html
+proto-render.html
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+node_modules/

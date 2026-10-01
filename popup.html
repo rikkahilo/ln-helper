@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>轻小说助手</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; width: 300px;
+    font: 13px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: #f6f7f9; color: #222;
+  }
+  .hd { display: flex; align-items: baseline; gap: 8px; padding: 10px 12px 8px; }
+  .hd b { font-size: 14px; }
+  .hd span { font-size: 11px; color: #888; }
+  .item {
+    display: block; width: 100%; text-align: left; cursor: pointer;
+    background: #fff; color: inherit; border: 1px solid #e3e5e8; border-radius: 8px;
+    padding: 9px 11px; margin: 0 12px 8px; width: calc(100% - 24px);
+    font: inherit;
+  }
+  .item:hover { border-color: #b9c6dc; background: #fbfcfe; }
+  .item:disabled { opacity: .55; cursor: default; }
+  .item b { display: block; font-size: 13px; }
+  .item span { display: block; font-size: 11px; color: #888; margin-top: 1px; }
+  #msg { min-height: 16px; margin: 2px 12px 8px; font-size: 11.5px; }
+  #msg.ok { color: #1a7f37; }
+  #msg.bad { color: #b42318; }
+  #verbox {
+    margin: 0 12px 12px; padding: 8px 10px; background: #fff;
+    border: 1px solid #e3e5e8; border-radius: 8px; font-size: 11.5px; color: #444;
+  }
+  #verbox div { display: flex; justify-content: space-between; gap: 8px; padding: 1px 0; }
+  #verbox em { font-style: normal; color: #888; }
+  #verbox code { font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .ft { padding: 0 12px 10px; font-size: 10.5px; color: #999; }
+</style>
+</head>
+<body>
+  <div class="hd"><b>轻小说助手</b><span id="ver">…</span></div>
+  <button class="item" id="btn-cache"><b>🗂 缓存管理</b><span>在任意网站打开统一书库(含章节 / 图片 / 归档 / 阅读进度)</span></button>
+  <button class="item" id="btn-settings"><b>⚙️ 设置</b><span>抓取方式 · 图床 Referer · AI 模型与提示词</span></button>
+  <button class="item" id="btn-version"><b>ℹ️ 版本信息</b><span>扩展版本 · 统一库规模与占用</span></button>
+  <div id="msg"></div>
+  <div id="verbox" hidden></div>
+  <div class="ft">书库是同一个:这里打开的和小说页面上那个「缓存管理」是同一份数据。</div>
+  <script src="popup.js"></script>
+</body>
+</html>

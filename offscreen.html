@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>lnlib(统一库)</title>
+</head>
+<body>
+  <!-- 统一库 lnlib 的持有者。
+       MV3 的 Service Worker 里没有 DOM / Blob / Worker,而内容脚本碰不到扩展 origin 的 IndexedDB,
+       所以就由这个隐藏文档来持有并读写统一库 —— 顺带把 Blob / Worker / WASM 这些重活也放在这儿。
+       v4.9.174-扩展移植:再加 ort + eSearchOCR + ocr-host —— **OCR 引擎从此常驻在这个文档里**,
+       不随网页刷新/关闭消失,且所有站点共用同一个(引擎只建一次;模型/ORT 字节本库本地直读)。 -->
+  <script src="lib/fflate.js"></script>
+  <script src="lib/ort.wasm.min.js"></script>
+  <script src="lib/eSearchOCR.umd.js"></script>
+  <script src="ln-codec.js"></script>
+  <script src="offscreen-db.js"></script>
+  <script src="lib/ocr-host.js"></script>
+</body>
+</html>
