@@ -24908,7 +24908,9 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
         '<div class="rd-aichat-convlist" id="rd-aichat-convlist" style="display:none"></div>' +
         '<div class="rd-aichat-settings" id="rd-aichat-settings" style="display:none">' +
           '<div class="rd-aichat-setrow"><label>上下文阈值</label><input type="number" id="rd-aichat-ctxlimit" min="500" max="20000" step="500" value="1000" style="flex:0 0 80px"/><span style="color:var(--rd-muted);font-size:11px">字符,用于获取本章上下文,超出则均匀取样(默认1000)</span></div>' +
-          '<div class="rd-aichat-setrow"><label>历史轮次</label><input type="number" id="rd-aichat-histrounds" min="1" max="20" step="1" value="5" style="flex:0 0 80px"/><span style="color:var(--rd-muted);font-size:11px">轮,AI记忆的最近对话</span></div>' +
+          '<div class="rd-aichat-setrow"><label>历史轮次</label><input type="number" id="rd-aichat-histrounds" min="1" max="50" step="1" value="20" style="flex:0 0 80px"/><span style="color:var(--rd-muted);font-size:11px">轮,AI记忆的最近对话上限(实际按 token 预算自动裁剪,默认20)</span></div>' +
+          // v4.9.474:token 预算做成设置项(原来是写死的 6000)。两个旋钮各管一边:轮数=最多几轮,token=总量。约 1 token ≈ 1.5 汉字。
+          '<div class="rd-aichat-setrow"><label>历史预算</label><input type="number" id="rd-aichat-histtokens" min="1000" max="20000" step="500" value="6000" style="flex:0 0 80px"/><span style="color:var(--rd-muted);font-size:11px">token,历史对话总量上限(超出丢最早的;思考不计入。默认6000≈9000字)</span></div>' +
           // v4.9.158:「工具轮次」整行已挪到下面的「⚙ 翻书检索设置」里(它是检索设置;放在不随「允许 AI 翻书检索」隐藏的「提问设置」里,
           //   会出现"看着能改、其实一个工具都不会被调用"的不一致 —— 那个 ⚙ 按钮在检索关闭时本来就是 display:none)
         '</div>' +
@@ -28329,7 +28331,7 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
     let chatConversations = []; // [{id, title, messages:[{role,content,thinking?,time,pending?}], createdAt}]
     let chatCurConvId = null;
     let chatBusy = false;
-    let chatPrefs = { global: true, spoiler: false, spoilerMode: 'hint', range: 'near', source: 'trans', custom: '', ctxLimit: 1000, histRounds: 5, maxRounds: 5, snippetLen: 300, searchCount: 10, searchSort: 'relevance' }; // v4.9.458:默认片段 200→300 字、结果数 6→10 段(放开截断) // v4.9.103:剧透三档 strict=拦并丢弃 / hint=不拦但给回答盖黑幕(默认) / open=不拦不遮;spoiler=true(旧值)等价 open。v4.9.154:删掉从未实现的 inspire(灵感问题)。v4.9.156:maxRounds=工具调用轮次上限(默认 5,旧版写死 3)
+    let chatPrefs = { global: true, spoiler: false, spoilerMode: 'hint', range: 'near', source: 'trans', custom: '', ctxLimit: 1000, histRounds: 20, histTokens: 6000, maxRounds: 5, snippetLen: 300, searchCount: 10, searchSort: 'relevance' }; // v4.9.458:默认片段 200→300 字、结果数 6→10 段(放开截断) // v4.9.103:剧透三档 strict=拦并丢弃 / hint=不拦但给回答盖黑幕(默认) / open=不拦不遮;spoiler=true(旧值)等价 open。v4.9.154:删掉从未实现的 inspire(灵感问题)。v4.9.156:maxRounds=工具调用轮次上限(默认 5,旧版写死 3)。v4.9.474:histTokens=历史对话 token 预算(默认 6000)。v4.9.477:histRounds 默认 5→20、上限 20→50(它只是"最多几轮"的上限,真正裁剪量由 histTokens 决定)
     const chatCurConv = () => chatConversations.find(c => c.id === chatCurConvId) || null;
     // 加载对话和偏好
     const chatLoad = () => {
@@ -28400,7 +28402,7 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
       }).join('') + '</div>';
     };
     // 渲染当前对话消息
-    const chatRender = () => {
+    const chatRender = (_inc) => {
       const body = $('#rd-aichat-body', box);
       if (!body) return;
       /*  v4.9.452(「AI 流式输出时，对话框不能上下滚动」):
@@ -28434,11 +28436,12 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
       } catch (e) {}
       const msgs = conv ? conv.messages : [];
       if (!msgs.length) {
+        body._rdOkN = 0; // v4.9.471:清空后重置增量渲染基线
         body.innerHTML = '<div class="rd-aichat-empty">输入问题开始对话<br>AI 需要书里的内容时会自己检索全书（可在下方开关关掉）</div>';
         return;
       }
       const _prevTop = body.scrollTop; // v4.9.452:整屏重画会把 scrollTop 归零，先记下来,收尾按需还原 
-      body.innerHTML = msgs.map((m, i) => {
+      const _msgHtml = (m, i) => { // v4.9.471:单条消息 → HTML(从 chatRender 的 map 回调抽出,供"全量重建"与"流式增量"共用)
         const cls = m.role === 'user' ? 'user' : 'ai' + (m.pending ? ' pending' : '');
         const meta = m.role === 'user' ? '你' : 'AI';
         let thinkHtml = '';
@@ -28491,8 +28494,26 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
           return '<div class="rd-aichat-msg ' + cls + '" data-mi="' + i + '" style="position:relative">' + _body +
             '<div data-rdspoiler-open="1" title="点击显示回答" style="position:absolute;inset:0;background:rgba(24,24,26,.92);color:#fff;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:6px;text-align:center;border-radius:8px;cursor:pointer;font-size:13px;line-height:1.7;padding:16px;z-index:5;user-select:none;transition:background .15s ease,box-shadow .15s ease,transform .15s ease" onmouseover="this.style.background=\'rgba(40,43,48,.97)\';this.style.boxShadow=\'0 4px 18px rgba(0,0,0,.45)\';this.style.transform=\'scale(1.012)\'" onmouseout="this.style.background=\'rgba(24,24,26,.92)\';this.style.boxShadow=\'none\';this.style.transform=\'none\'">⚠ 本回答参考了后续章节(涉及剧透)<span style="font-size:12px;opacity:.85">点击这里显示回答</span></div></div>';
         }
-        return '<div class="rd-aichat-msg ' + cls + '">' + _body + '</div>';
-      }).join('');
+        return '<div class="rd-aichat-msg ' + cls + '" data-mi="' + i + '">' + _body + '</div>';
+      };
+      /*  v4.9.471(「AI 提问对话框,思考流式输出时特别卡」):流式期间 _rdRenderSoon 每 90ms 重画一次,
+          而整屏 innerHTML 重建会把**冻结的历史消息**也重算一遍(思考正文 escHtml + 正文 Markdown + 产物卡
+          rdArtSvg 每帧重生成、无记忆化),对话一长 / 思考一长就卡。但流式时真正在变的只有**最后一条**。
+          这里加一条快路径:消息条数与上次全量渲染一致时(流式轮内条数不变),只替换最后一条消息节点,
+          历史节点原地不动 ⇒ 产物 SVG / Markdown / escHtml 全部跳过。条数变了或找不到节点时自动回落全量重建。 */
+      if (_inc && body._rdOkN === msgs.length) {
+        try {
+          const _li = msgs.length - 1;
+          const _ln = body.querySelector('.rd-aichat-msg[data-mi="' + _li + '"]');
+          if (_ln) {
+            _ln.outerHTML = _msgHtml(msgs[_li], _li);
+            if (body._rdStick) body.scrollTop = body.scrollHeight;
+            return;
+          }
+        } catch (e) {}
+      }
+      body.innerHTML = msgs.map(_msgHtml).join('');
+      body._rdOkN = msgs.length; // v4.9.471:记下基线,供流式快路径判断"条数是否未变"
       // v4.9.104:黑幕"点击揭开"改为容器上的事件委托 —— 行内 onclick 调不到沙箱里的函数(油猴的 window 与页面 window 不同),
       //   所以必须由脚本自己在容器上监听(只绑一次)。
       if (body && !body._rdSpoilerBound) {
@@ -28687,8 +28708,9 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
         const gbtnOnline = $('#rd-aichat-globalset-btn', panel); if (gbtnOnline && st.online) gbtnOnline.style.display = 'none';
         const r = $('#rd-aichat-range', panel); if (r) r.value = chatPrefs.range;
         const s = $('#rd-aichat-source', panel); if (s) s.value = chatPrefs.source;
-        const cl = $('#rd-aichat-ctxlimit', panel); if (cl) cl.value = chatPrefs.ctxLimit || 3000;
-        const hr = $('#rd-aichat-histrounds', panel); if (hr) hr.value = chatPrefs.histRounds || 5;
+        const cl = $('#rd-aichat-ctxlimit', panel); if (cl) cl.value = chatPrefs.ctxLimit || 1000; // v4.9.479:兜底 3000→1000,与 HTML 默认/默认对象/运行时兜底统一(3000 是早期遗留值、当前够不到)
+        const hr = $('#rd-aichat-histrounds', panel); if (hr) hr.value = chatPrefs.histRounds || 20; // v4.9.477:默认 5→20
+        const htk = $('#rd-aichat-histtokens', panel); if (htk) htk.value = chatPrefs.histTokens || 6000; // v4.9.474
         const mr2 = $('#rd-aichat-maxrounds', panel); if (mr2) mr2.value = chatPrefs.maxRounds || 5; // v4.9.156
         const sl = $('#rd-aichat-snippetlen', panel); if (sl) sl.value = chatPrefs.snippetLen || 300;
         const sc = $('#rd-aichat-searchcount', panel); if (sc) sc.value = chatPrefs.searchCount || 10;
@@ -28887,7 +28909,8 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
       });
       $('#rd-aichat-source', panel).addEventListener('change', (e) => { chatPrefs.source = e.target.value; chatSave(); });
       $('#rd-aichat-ctxlimit', panel).addEventListener('change', (e) => { const v = Math.max(500, Math.min(20000, parseInt(e.target.value) || 1000)); chatPrefs.ctxLimit = v; e.target.value = v; chatSave(); });
-      $('#rd-aichat-histrounds', panel).addEventListener('change', (e) => { const v = Math.max(1, Math.min(20, parseInt(e.target.value) || 5)); chatPrefs.histRounds = v; e.target.value = v; chatSave(); });
+      $('#rd-aichat-histrounds', panel).addEventListener('change', (e) => { const v = Math.max(1, Math.min(50, parseInt(e.target.value) || 20)); chatPrefs.histRounds = v; e.target.value = v; chatSave(); }); // v4.9.477:上限 20→50、默认 5→20
+      $('#rd-aichat-histtokens', panel).addEventListener('change', (e) => { const v = Math.max(1000, Math.min(20000, parseInt(e.target.value) || 6000)); chatPrefs.histTokens = v; e.target.value = v; chatSave(); }); // v4.9.474:历史对话 token 预算(超出丢最早的)
       $('#rd-aichat-maxrounds', panel).addEventListener('change', (e) => { const v = Math.max(1, Math.min(12, parseInt(e.target.value) || 5)); chatPrefs.maxRounds = v; e.target.value = v; chatSave(); }); // v4.9.156:工具轮次上限
       $('#rd-aichat-snippetlen', panel).addEventListener('change', (e) => { const v = Math.max(100, Math.min(1200, parseInt(e.target.value) || 300)); chatPrefs.snippetLen = v; e.target.value = v; chatSave(); }); // v4.9.458:上限 600→1200
       $('#rd-aichat-searchcount', panel).addEventListener('change', (e) => { const v = Math.max(3, Math.min(20, parseInt(e.target.value) || 10)); chatPrefs.searchCount = v; e.target.value = v; chatSave(); }); // v4.9.458:上限 12→20
@@ -29245,7 +29268,9 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
          · arrKey 承载数据的数组键(items/nodes/events)
          · graph  是否有图形渲染(true 的类型仍需在 rdArtSvg 里加一条渲染分支)
          · spec   【结构化产物】契约里"该 type 的字段"说明片段 */
-      const RD_ART_TYPES = { outline: { name: '大纲', arrKey: 'items', graph: false, spec: 'outline→items[{depth,text,chapter,fl}]（分层要点,text 写整条内容）' }, mindmap: { name: '思维导图', arrKey: 'nodes', graph: true, spec: 'mindmap→nodes[{id,label,parent,detail}]（树状骨架,label 用短标签,detail 放这个节点的补充说明）' }, relations: { name: '人物关系', arrKey: 'nodes', graph: true, spec: 'relations→nodes[{id,label,group}]+edges[{a,b,label,detail,since}]（label=2-6字短标签如"正妻""侧室",detail=完整描述）' }, timeline: { name: '时间线', arrKey: 'events', graph: true, spec: 'timeline→events[{chapter,fl,label,kind,time}]（按章推进的事件,time=原文写明的时间点,如"第三年冬",没写就留空）' } };
+      /* v4.9.486:四类产物统一「可选补充字段」约定 —— detail=常驻(画在图/条目里,占地方)、tip=悬浮(<title>,不占地方);
+         两者都可省,且 spec 里明说"不要每条都填",避免模型硬凑。 */
+      const RD_ART_TYPES = { outline: { name: '大纲', arrKey: 'items', graph: false, spec: 'outline→items[{depth,text,chapter,fl,detail,tip}]（分层要点,depth=层级(1 起),text 写整条内容;detail=补充说明(次级灰字,可省);tip=悬停才显示的说明(可省)）' }, mindmap: { name: '思维导图', arrKey: 'nodes', graph: true, spec: 'mindmap→nodes[{id,label,parent,detail,tip,tag,color,icon,order}]（树状骨架:label 写完整要点即可,节点框会按字数自动换行加高;parent=上级节点 id,顶层节点省略;detail=常驻框内的补充说明(可省,**不要每个节点都填**);tip=悬停才显示的说明(可省);tag=短标签如"关键/伏笔"(可省);icon=一个符号如⚠★(可省);color=节点色 #rrggbb(可省);order=同层排序号,小的在前(可省)）' }, relations: { name: '人物关系', arrKey: 'nodes', graph: true, spec: 'relations→nodes[{id,label,group,detail,tip,color}]+edges[{a,b,label,detail,since}]（label=2-6字短标签如"正妻""侧室",detail=完整描述;节点 detail=常驻框内的一句话身份(可省),tip=悬停说明(可省),color=节点色 #rrggbb(可省)）' }, timeline: { name: '时间线', arrKey: 'events', graph: true, spec: 'timeline→events[{chapter,fl,label,kind,time,detail,tip}]（按章推进的事件,time=原文写明的时间点,如"第三年冬",没写就留空;kind=事件类型短标签如"战事/日常/伏笔"(可省,会按类型着色);detail=常驻补充说明(可省);tip=悬停说明(可省)）' } };
       const RD_ART_TYPE_LIST = Object.keys(RD_ART_TYPES); // ['outline','mindmap','relations','timeline']
       const RD_ART_NAMES = RD_ART_TYPE_LIST.map(t => RD_ART_TYPES[t].name).join(' / '); // '大纲 / 思维导图 / 人物关系 / 时间线'
       const RD_ART_ARRKEYS = RD_ART_TYPE_LIST.map(t => RD_ART_TYPES[t].arrKey).filter((k, i, a) => a.indexOf(k) === i); // ['items','nodes','events']
@@ -29436,8 +29461,17 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
           if (last && got.length) last.arts = (Array.isArray(last.arts) ? last.arts : []).concat(got.map(o => o.id));
           if (last && bad) last.artBad = bad;
           /* v4.9.446:② 半截产物 —— 开了 [[ARTIFACT]] 却没有闭合标签(典型:回答撞上输出长度上限被截断)，明说「没入库」 */
-          const _open = (_orig.match(/\[\[\s*ARTIFACT\s*\]\]/gi) || []).length;
-          if (_open > seen) warns.push('有一个 [[ARTIFACT]] 标记块**没有闭合**(多半是回答撞上输出长度上限被截断)⇒ 这次产物**没有入库** —— 回一句「继续」让它把这块补完,或调大 AI 设置里的 MAX TOKEN 再生成一次');
+          /* v4.9.487:修两处误报 —— ①只把"标记后面紧跟 {"的算作真块(正文里当普通文字引用的 `[[ARTIFACT]]` 不再凑数);
+             ②已经入库时改口径为"另有 N 块未入库",不再谎报"这次产物没有入库" */
+          const _open = (_orig.match(/\[\[\s*ARTIFACT\s*\]\]\s*(?=\{)/gi) || []).length;
+          const _miss = _open - seen;
+          if (_miss > 0) {
+            const _head = '有 ' + _miss + ' 个 [[ARTIFACT]] 标记块**没有闭合**(多半是回答撞上输出长度上限被截断)';
+            const _tail = ' —— 回一句「继续」让它补完,或调大 AI 设置里的 MAX TOKEN 再生成一次';
+            warns.push(got.length
+              ? (_head + '⇒ 这 ' + _miss + ' 块**未入库**(不影响上面已入库的产物)' + _tail)
+              : (_head + '⇒ 这次产物**没有入库**' + _tail));
+          }
           if (warns.length) result.content = (result.content ? (result.content + '\n\n') : '') + '⚠ ' + warns.join('；') + '。';
         } catch (e) {}
       };
@@ -29463,6 +29497,18 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
           if (['mindmap', 'relations', 'timeline'].indexOf(t) < 0) return '';
           const esc = (s) => escHtml(String(s == null ? '' : s));
           const est = (s, fs) => { let w = 0; for (const ch of String(s == null ? '' : s)) w += (ch.charCodeAt(0) > 255 ? fs : fs * 0.55); return w; };
+          /* v4.9.486:多行换行助手提到顶层 —— 思维导图/时间线/人物关系共用(原来只写在思维导图分支里) */
+          const _wrap = (s, fs, maxW) => {
+            const str = String(s == null ? '' : s);
+            const ls = []; let cur = '';
+            for (const ch of str) {
+              if (ch === '\n') { ls.push(cur); cur = ''; continue; }
+              const t2 = cur + ch;
+              if (cur && est(t2, fs) > maxW) { ls.push(cur); cur = ch; } else cur = t2;
+            }
+            ls.push(cur);
+            return ls;
+          };
           const _mmCols = ['#2f6f4f', '#4a6fa5', '#a5824a', '#7a4aa5', '#a54a6f', '#4a8a8a'];
           const _groupCols = ['#a54a6f', '#4a6fa5', '#2f6f4f', '#a5824a', '#7a4aa5', '#4a8a8a', '#8a6f4a', '#6f4a8a'];
           const _groupOf = (g) => { const s = String(g || ''); let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return _groupCols[h % _groupCols.length]; };
@@ -29490,37 +29536,85 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
               const pid = (x.parent != null && String(x.parent) !== '') ? String(x.parent) : '';
               if (pid && byId[pid] && byId[pid] !== x) (kids[pid] = kids[pid] || []).push(x); else roots.push(x);
             });
+            /* v4.9.468:同层可选 order(数字小的排前) —— 让 AI 能指定兄弟节点顺序,不填就按输出顺序 */
+            const _mmOrd = (x) => { const n = parseInt(x && x.order, 10); return isNaN(n) ? 1e9 : n; };
+            Object.keys(kids).forEach(_pk => kids[_pk].sort((a, b) => _mmOrd(a) - _mmOrd(b)));
+            roots.sort((a, b) => _mmOrd(a) - _mmOrd(b));
             const order = [];
             const walk = (x, d) => { if (!x || order.length >= mmLim) return; order.push({ x: x, d: d }); (kids[String(x.id != null ? x.id : '')] || []).forEach(c => walk(c, d + 1)); };
             roots.forEach(r => walk(r, 0));
             ns.forEach(x => { if (order.length >= mmLim) return; if (!order.some(o => o.x === x)) order.push({ x: x, d: 1 }); });
             const _mmMore = ns.length - order.length;
-            const rowH = 32, colW = 220, PAD = 14;
+            const PAD = 14, GAPX = 40, ELB = 18, GAPY = 10, MAXTW = 264, lhL = 15, lhD = 14;
+            /* v4.9.468:节点改为多行自适应 —— label 完整换行显示,detail 直接画在框内;框宽/框高按实际文字算(_wrap 已提到顶层共用) */
+            /* v4.9.468:节点可选 color(#rgb/#rrggbb)覆盖按深度着色的默认色(统一展开成 6 位,拼透明度才不会失效) */
+            const _mmNodeCol = (x2, d) => {
+              let c = String((x2 && x2.color) || '').trim();
+              if (/^#[0-9a-fA-F]{3}$/.test(c)) c = '#' + c[1] + c[1] + c[2] + c[2] + c[3] + c[3];
+              return /^#[0-9a-fA-F]{6}$/.test(c) ? c : _mmCols[d % _mmCols.length];
+            };
             let maxD = 0; order.forEach(o => { if (o.d > maxD) maxD = o.d; });
-            /* v4.9.412:计算最后一列最大文字宽度,避免右侧文字被截断 */
-            let _maxLastW = 0; order.forEach(o => { if (o.d === maxD) _maxLastW = Math.max(_maxLastW, est(String((o.x && (o.x.label || o.x.text)) || ''), 12) + 24); });
-            W = PAD * 2 + maxD * colW + Math.max(180, _maxLastW + 20); H = PAD * 2 + order.length * rowH;
-            order.forEach((o, i) => {
-              const x = PAD + o.d * colW, y = PAD + i * rowH;
-              const label = String((o.x && (o.x.label || o.x.text)) || '');
-              const col = _mmCols[o.d % _mmCols.length];
+            /* ① 先量尺寸:文字宽度定框宽,label/detail/tag 行数定框高 */
+            order.forEach(o => {
+              const x2 = o.x || {};
               const isRoot = o.d === 0;
-              const bh = isRoot ? 26 : 22;
-              /* v4.9.415:节点框适应文字宽度(上限280),避免长文字溢出框 */
-              const bw = Math.min(280, est(label, isRoot ? 12.5 : 12) + 16);
-              /* v4.9.445:可选 detail —— 用 <title> 悬停查看,不占画布;虚线下划线提示"这里还有说明" */
-              const _det = String((o.x && o.x.detail) || '');
-              out.push('<g>' + (_det ? ('<title>' + esc(_det) + '</title>') : '') +
-                '<rect x="' + x + '" y="' + y + '" width="' + bw + '" height="' + bh + '" rx="' + (isRoot ? 7 : 5) + '" fill="' + (isRoot ? col : col + '14') + '" stroke="' + col + '" stroke-width="' + (isRoot ? 1.5 : 1) + '"/>' +
-                '<text x="' + (x + 8) + '" y="' + (y + (isRoot ? 17 : 15)) + '" font-size="' + (isRoot ? 12.5 : 12) + '" fill="' + (isRoot ? '#fff' : col) + '"' + (isRoot ? ' font-weight="600"' : '') + (_det ? ' text-decoration="underline dotted"' : '') + rdArtJumpAttr(o.x) + '>' + esc(label) + '</text></g>');
+              const icon = String(x2.icon || '').trim();
+              const label = String((x2.label || x2.text) || '');
+              const det = String(x2.detail || '');
+              const tag = String(x2.tag || '').trim();
+              const tip = String(x2.tip || '').trim(); /* v4.9.486:可选悬停说明,不占框内空间 */
+              const fL = isRoot ? 12.5 : 12, fD = 11;
+              o._isRoot = isRoot; o._fL = fL; o._fD = fD; o._det = det; o._tag = tag; o._tip = tip;
+              o._lines = _wrap(icon ? (icon + ' ' + label) : label, fL, MAXTW);
+              o._dlines = det ? _wrap(det, fD, MAXTW) : [];
+              let tw = 0;
+              o._lines.forEach(t2 => { tw = Math.max(tw, est(t2, fL)); });
+              o._dlines.forEach(t2 => { tw = Math.max(tw, est(t2, fD)); });
+              if (tag) tw = Math.max(tw, est(tag, 10.5) + 12);
+              o._bw = Math.max(isRoot ? 64 : 46, Math.min(300, Math.ceil(tw) + 16));
+              let bh = (isRoot ? 7 : 6) + o._lines.length * lhL;
+              if (o._dlines.length) bh += 3 + o._dlines.length * lhD;
+              if (tag) bh += 16;
+              o._bh = Math.ceil(bh + (isRoot ? 7 : 6));
+              o._col = _mmNodeCol(x2, o.d);
+            });
+            /* v4.9.469:列位置按"该列最宽节点"自适应 —— 固定列宽时宽框会占掉右侧过道,下一层的连线会穿过上一层的框/压住文字 */
+            const _colWid = [];
+            order.forEach(o => { _colWid[o.d] = Math.max(_colWid[o.d] || 0, o._bw); });
+            const _colX = []; let _cx = PAD;
+            for (let _d = 0; _d <= maxD; _d++) { _colX[_d] = _cx; _cx += (_colWid[_d] || 0) + GAPX; }
+            order.forEach(o => { o._x = _colX[o.d] || PAD; });
+            let _cy = PAD;
+            order.forEach(o => { o._y = _cy; o._cy = _cy + o._bh / 2; _cy += o._bh + GAPY; });
+            W = Math.max(180, Math.ceil(_colX[maxD] + (_colWid[maxD] || 0) + PAD));
+            H = Math.ceil(_cy - GAPY + PAD);
+            /* ② 再落笔:节点框(tspan 多行 label + 框内 detail + tag 徽章) + 折线连线(带箭头) */
+            order.forEach(o => {
+              const x = o._x, y = o._y, bw = o._bw, bh = o._bh, col = o._col, isRoot = o._isRoot;
+              const padT = isRoot ? 7 : 6;
+              const txtCol = isRoot ? '#fff' : col;
+              const detCol = isRoot ? 'rgba(255,255,255,.82)' : '#666';
+              let inner = '';
+              inner += '<text x="' + (x + 8) + '" y="' + (y + padT + o._fL * 0.92).toFixed(1) + '" font-size="' + o._fL + '" fill="' + txtCol + '"' + (isRoot ? ' font-weight="600"' : '') + rdArtJumpAttr(o.x) + '>' +
+                o._lines.map((t2, li) => '<tspan x="' + (x + 8) + '"' + (li ? ' dy="' + lhL + '"' : '') + '>' + esc(t2) + '</tspan>').join('') + '</text>';
+              if (o._dlines.length) {
+                const yD = y + padT + o._lines.length * lhL + 3 + o._fD * 0.92;
+                inner += '<text x="' + (x + 8) + '" y="' + yD.toFixed(1) + '" font-size="' + o._fD + '" fill="' + detCol + '">' +
+                  o._dlines.map((t2, li) => '<tspan x="' + (x + 8) + '"' + (li ? ' dy="' + lhD + '"' : '') + '>' + esc(t2) + '</tspan>').join('') + '</text>';
+              }
+              if (o._tag) {
+                const tw2 = est(o._tag, 10.5) + 12, ty = y + bh - padT - 15;
+                inner += '<rect x="' + (x + 8) + '" y="' + ty.toFixed(1) + '" width="' + tw2.toFixed(1) + '" height="15" rx="7" fill="' + (isRoot ? '#ffffff2e' : col + '1f') + '" stroke="' + (isRoot ? '#ffffff55' : col + '55') + '"/>' +
+                  '<text x="' + (x + 8 + tw2 / 2).toFixed(1) + '" y="' + (ty + 10.7).toFixed(1) + '" font-size="10.5" fill="' + (isRoot ? '#fff' : col) + '" text-anchor="middle">' + esc(o._tag) + '</text>';
+              }
+              out.push('<g>' + (o._tip ? ('<title>' + esc(o._tip) + '</title>') : '') + '<rect x="' + x + '" y="' + y + '" width="' + bw + '" height="' + bh + '" rx="' + (isRoot ? 7 : 5) + '" fill="' + (isRoot ? col : col + '14') + '" stroke="' + col + '" stroke-width="' + (isRoot ? 1.5 : 1) + '"/>' + inner + '</g>');
               const pid = (o.x && o.x.parent != null && String(o.x.parent) !== '') ? String(o.x.parent) : '';
               if (pid && byId[pid]) {
                 let pi = -1; order.forEach((q, qi) => { if (q.x === byId[pid]) pi = qi; });
                 if (pi >= 0) {
-                  const pcol = _mmCols[order[pi].d % _mmCols.length];
-                  const px = PAD + order[pi].d * colW + Math.min(280, est(String(byId[pid].label || ''), 12) + 16);
-                  const py = PAD + pi * rowH + (order[pi].d === 0 ? 13 : 11);
-                  out.push('<path d="M' + px + ' ' + py + ' H' + (x - 8) + ' V' + (y + (isRoot ? 13 : 11)) + ' H' + (x - 2) + '" fill="none" stroke="' + pcol + '55" stroke-width="1.3" marker-end="url(#rdArr)"/>');
+                  const P = order[pi];
+                  const _bus = x - ELB;
+                  out.push('<path d="M' + (P._x + P._bw) + ' ' + P._cy.toFixed(1) + ' H' + _bus + ' V' + o._cy.toFixed(1) + ' H' + (x - 2) + '" fill="none" stroke="' + P._col + '55" stroke-width="1.3" marker-end="url(#rdArr)"/>');
                 }
               }
             });
@@ -29530,7 +29624,7 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
               (_mmId ? ('<button type="button" class="rd-aichat-btn" data-artmore="' + esc(_mmId) + '" style="font-size:11.5px;padding:2px 8px">继续显示接下来 ' + Math.min(rdArtMmStep, _mmMore) + ' 个</button>') : '') + '</div>') : '';
             return wrap() + _mmFoot;
           }
-          /* ② 时间线:左侧竖轴 + 事件卡片(交替背景/圆点白边/kind标签) */
+          /* ② 时间线:左侧竖轴 + 事件卡片(label/detail 多行自适应;圆点与 kind 徽章按事件类型着色) */
           if (t === 'timeline') {
             const evs0 = (Array.isArray(j.events) ? j.events : []).filter(x => x && (x.label || x.text || x.chapter != null));
             if (!evs0.length) return '';
@@ -29540,32 +29634,72 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
               .sort((a, b) => ((isNaN(a.c) ? 1e9 : a.c) - (isNaN(b.c) ? 1e9 : b.c)) || (a.i - b.i)).map(o => o.e);
             const _evMore = (opt && opt.full) ? 0 : Math.max(0, _evAll.length - 40);
             const evs = (opt && opt.full) ? _evAll : _evAll.slice(0, 40);
+            /* v4.9.486:kind 可选着色 —— 出现即按顺序取色,同一 kind 全图同色(用于左色条/圆点/徽章/图例) */
+            const _kindPal = ['#2f6f4f', '#a54a6f', '#4a6fa5', '#a5824a', '#7a4aa5', '#4a8a8a'];
+            const _kindMap = {}; let _kindN = 0;
+            const _kindCol = (k) => { const s = String(k || '').trim(); if (!s) return ''; if (!(s in _kindMap)) _kindMap[s] = _kindPal[_kindN++ % _kindPal.length]; return _kindMap[s]; };
             /* v4.9.445:事件可选 time(原文写明的时间点)—— 只作展示,排序仍按 chapter;轴宽随最长 time 自适应 */
             let _maxTW = 0; evs.forEach(e => { const T = String(e.time || ''); if (T) _maxTW = Math.max(_maxTW, est(T, 11)); });
-            const rowH = 38, ax = Math.max(52, _maxTW + 24), PAD = 12;
-            let maxW = 0; evs.forEach(e => { const L = String(e.label || e.text || ''); maxW = Math.max(maxW, est(L, 12.5)); });
-            const cardW = Math.min(480, maxW + 80);
-            W = ax + cardW + 30; H = PAD * 2 + evs.length * rowH;
-            out.push('<line x1="' + ax + '" y1="' + (PAD + 8) + '" x2="' + ax + '" y2="' + (H - PAD - 8) + '" stroke="#ddd" stroke-width="2.5"/>');
-            evs.forEach((e, i) => {
-              const y = PAD + i * rowH + 18;
+            const ax = Math.max(52, _maxTW + 24), PAD = 12;
+            const FS_L = 12.5, FS_D = 11, LH_L = 16, LH_D = 15, PADX = 10, GAP = 6;
+            /* ① 先按内容估统一卡宽(上限 480),再逐条按卡宽做多行换行(label 首行还要给 kind 徽章让位) */
+            let _maxL = 0, _maxD = 0, _maxB = 0;
+            evs.forEach(e => {
+              _maxL = Math.max(_maxL, est(String(e.label || e.text || ''), FS_L));
+              const D = String(e.detail || '').trim(); if (D) _maxD = Math.max(_maxD, est(D, FS_D));
+              if (e.kind) _maxB = Math.max(_maxB, est(String(e.kind), 10.5) + 12);
+            });
+            const cardW = Math.min(480, Math.ceil(Math.min(430, Math.max(_maxL, _maxD, 120))) + PADX * 2 + (_maxB ? _maxB + 8 : 0));
+            const rows2 = evs.map(e => {
               const ch = (e.chapter != null && String(e.chapter) !== '') ? String(e.chapter) : '';
               const L = String(e.label || e.text || '');
-              const cardX = ax + 16, cardY = y - 14, cardH = 28;
-              out.push('<rect x="' + cardX + '" y="' + cardY + '" width="' + cardW + '" height="' + cardH + '" rx="5" fill="' + (i % 2 ? '#f7f9f7' : '#fff') + '" stroke="#e8e8e8"/>');
-              out.push('<circle cx="' + ax + '" cy="' + y + '" r="6" fill="#2f6f4f" stroke="#fff" stroke-width="2.5"/>');
-              /* v4.9.445:有 time 就显示 time(悬停可看章号),没有才退回"第N章"/序号 */
-              const _tm = String(e.time || '');
-              const _axTxt = _tm ? esc(_tm) : (ch ? ('第' + esc(ch) + '章') : String(i + 1));
-              out.push('<text x="' + (ax - 12) + '" y="' + (y + 4) + '" font-size="11" fill="#999" text-anchor="end">' + ((_tm && ch) ? ('<title>第' + esc(ch) + '章</title>') : '') + _axTxt + '</text>');
-              out.push('<text x="' + (cardX + 10) + '" y="' + (y + 4) + '" font-size="12.5" fill="#333"' + rdArtJumpAttr(e) + '>' + esc(L) + '</text>');
-              if (e.kind) {
-                const kl = String(e.kind), kw = est(kl, 10.5) + 12;
-                out.push('<rect x="' + (cardX + cardW - kw - 8) + '" y="' + (y - 8) + '" width="' + kw + '" height="17" rx="3" fill="#2f6f4f14"/>');
-                out.push('<text x="' + (cardX + cardW - kw / 2 - 8) + '" y="' + (y + 4) + '" font-size="10.5" fill="#2f6f4f" text-anchor="middle">' + esc(kl) + '</text>');
-              }
+              const D = String(e.detail || '').trim();
+              const kind = String(e.kind || '').trim();
+              const kw = kind ? est(kind, 10.5) + 12 : 0;
+              const avail = Math.max(60, cardW - PADX * 2 - (kw ? kw + 8 : 0));
+              const llines = _wrap(L, FS_L, avail);
+              const dlines = D ? _wrap(D, FS_D, cardW - PADX * 2) : [];
+              const h = Math.max(30, llines.length * LH_L + (dlines.length ? 4 + dlines.length * LH_D : 0) + 12);
+              return { e: e, ch: ch, kind: kind, kw: kw, col: kind ? _kindCol(kind) : '', tip: String(e.tip || '').trim(), llines: llines, dlines: dlines, h: h };
             });
-            return wrap(_evMore > 0 ? ('<div style="margin:2px 0 4px;color:#8a8a8a;font-size:11.5px">共 ' + _evAll.length + ' 条,图中仅绘制前 40 条(省略 ' + _evMore + ' 条)</div>') : '');
+            const totH = rows2.reduce((s, r) => s + r.h + GAP, 0);
+            W = ax + cardW + 30; H = PAD * 2 + totH;
+            out.push('<line x1="' + ax + '" y1="' + (PAD + 6) + '" x2="' + ax + '" y2="' + (H - PAD - 6) + '" stroke="#ddd" stroke-width="2.5"/>');
+            let _y = PAD;
+            rows2.forEach((r, i) => {
+              const cy = _y + r.h / 2;
+              const col = r.col || '#2f6f4f';
+              const cardX = ax + 16, cardY = _y, cardH = r.h, _lx = cardX + PADX;
+              out.push('<g>' + (r.tip ? ('<title>' + esc(r.tip) + '</title>') : ''));
+              out.push('<rect x="' + cardX + '" y="' + cardY + '" width="' + cardW + '" height="' + cardH + '" rx="5" fill="' + (i % 2 ? '#f7f9f7' : '#fff') + '" stroke="#e8e8e8"/>');
+              out.push('<rect x="' + cardX + '" y="' + cardY + '" width="3" height="' + cardH + '" rx="1.5" fill="' + col + '" opacity="0.8"/>');
+              out.push('<circle cx="' + ax + '" cy="' + cy.toFixed(1) + '" r="6" fill="' + col + '" stroke="#fff" stroke-width="2.5"/>');
+              /* 轴侧文字:优先 time(悬停看章号),否则"第N章"/序号 */
+              const _tm = String(r.e.time || '');
+              const _axTxt = _tm ? esc(_tm) : (r.ch ? ('第' + esc(r.ch) + '章') : String(i + 1));
+              out.push('<text x="' + (ax - 12) + '" y="' + (cy + 4).toFixed(1) + '" font-size="11" fill="#999" text-anchor="end">' + ((_tm && r.ch) ? ('<title>第' + esc(r.ch) + '章</title>') : '') + _axTxt + '</text>');
+              const _ly0 = cardY + 6 + FS_L * 0.92;
+              out.push('<text x="' + _lx + '" y="' + _ly0.toFixed(1) + '" font-size="' + FS_L + '" fill="#333"' + rdArtJumpAttr(r.e) + '>' +
+                r.llines.map((t2, li) => '<tspan x="' + _lx + '"' + (li ? ' dy="' + LH_L + '"' : '') + '>' + esc(t2) + '</tspan>').join('') + '</text>');
+              if (r.dlines.length) {
+                const _dy0 = _ly0 + r.llines.length * LH_L + 4;
+                out.push('<text x="' + _lx + '" y="' + _dy0.toFixed(1) + '" font-size="' + FS_D + '" fill="#777">' +
+                  r.dlines.map((t2, li) => '<tspan x="' + _lx + '"' + (li ? ' dy="' + LH_D + '"' : '') + '>' + esc(t2) + '</tspan>').join('') + '</text>');
+              }
+              out.push('</g>');
+              if (r.kind && r.kw) {
+                const kby = cardY + 5;
+                out.push('<rect x="' + (cardX + cardW - r.kw - 8) + '" y="' + kby.toFixed(1) + '" width="' + r.kw.toFixed(1) + '" height="17" rx="3" fill="' + col + '1a"/>');
+                out.push('<text x="' + (cardX + cardW - r.kw / 2 - 8).toFixed(1) + '" y="' + (kby + 12.2).toFixed(1) + '" font-size="10.5" fill="' + col + '" text-anchor="middle">' + esc(r.kind) + '</text>');
+              }
+              _y += r.h + GAP;
+            });
+            /* v4.9.486:图例(kind→颜色) —— 只有出现 kind 才画 */
+            const _kinds = Object.keys(_kindMap);
+            const _legend = _kinds.length ? ('<div style="display:flex;flex-wrap:wrap;gap:4px 14px;margin:2px 0 4px;font-size:11.5px;color:#666">' +
+              _kinds.map(k => '<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:50%;background:' + _kindMap[k] + ';display:inline-block"></span>' + esc(k) + '</span>').join('') + '</div>') : '';
+            const _evNote = _evMore > 0 ? ('<div style="margin:2px 0 4px;color:#8a8a8a;font-size:11.5px">共 ' + _evAll.length + ' 条,图中仅绘制前 40 条(省略 ' + _evMore + ' 条)</div>') : '';
+            return wrap(_legend + _evNote);
           }
           /* ③ 人物关系:多层同心圆布点 —— 度高的放中心,度低的放外围,减少连线交叉 */
           if (t === 'relations') {
@@ -29575,6 +29709,12 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
             /* v4.9.457:opt.full(下载用)，layout() 不截断、也不出省略说明 */
             const _relMore = (opt && opt.full) ? 0 : Math.max(0, ns.length - 40);
             const keyOf = (x, i) => String(x.id != null ? x.id : ('n' + i));
+            /* v4.9.486:节点可选 color(#rgb/#rrggbb)覆盖分组色(统一成 6 位) —— 绘制阶段(本分支外层)要用,故放这里 */
+            const _relNodeCol = (x2) => {
+              let c = String((x2 && x2.color) || '').trim();
+              if (/^#[0-9a-fA-F]{3}$/.test(c)) c = '#' + c[1] + c[1] + c[2] + c[2] + c[3] + c[3];
+              return /^#[0-9a-fA-F]{6}$/.test(c) ? c : '';
+            };
             /* v4.9.443:放射环布局 —— 度最高者居中成大圆盘,其余按 BFS 分层铺同心环;
                边一律直线(允许适度交叉),节点标签方位自适应避让本节点出射线并紧贴端点 */
             const scene = (function () {
@@ -29852,15 +29992,26 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
                 const rootNode = nodeById[rootKey];
                 const rootName = String(rootNode.n.label || rootNode.n.text || rootKey);
                 const rootGroup = String(rootNode.n.group || '');
-                const rootR = Math.max(40, est(rootName, 13.5) / 2 + 16, rootGroup ? est(rootGroup, 9.5) / 2 + 26 : 0);
+                /* v4.9.486:根节点(中心盘)也吃 detail —— 提前算换行,好按它把盘面撑大,避免文字溢出盘外看不见 */
+                const rootDet = String(rootNode.n.detail || '').trim();
+                const rootDL = rootDet ? _wrap(rootDet, 9, Math.max(96, est(rootName, 13.5) + 20)) : [];
+                let rootRExtra = 0;
+                rootDL.forEach(t2 => { rootRExtra = Math.max(rootRExtra, est(t2, 9) / 2 + 12); });
+                if (rootDL.length) rootRExtra = Math.max(rootRExtra, rootDL.length * 11 / 2 + 20);
+                const rootR = Math.max(40, est(rootName, 13.5) / 2 + 16, rootGroup ? est(rootGroup, 9.5) / 2 + 26 : 0, rootRExtra);
                 function blockSizeOf(k) {
                   const nd = nodeById[k];
                   const name = String(nd.n.label || nd.n.text || k);
                   const grp = nd.n.group ? String(nd.n.group) : '';
+                  /* v4.9.486:可选 detail —— 常驻框内灰字,按 150px 宽换行 */
+                  const det = String(nd.n.detail || '').trim();
+                  const dl = det ? _wrap(det, 9, 150) : [];
                   const h1 = 19, h2 = grp ? 15 : 0, lgap = grp ? 3 : 0;
+                  const h3 = dl.length ? (3 + dl.length * 12 + 2) : 0;
                   const w1 = Math.max(est(name, 12.5) + 10, 26);
                   const w2 = grp ? est(grp, 9.5) + 10 : 0;
-                  return { name, grp, w: Math.max(w1, w2), h: h1 + lgap + h2, h1, h2 };
+                  let w3 = 0; dl.forEach(t2 => { w3 = Math.max(w3, est(t2, 9) + 10); });
+                  return { name: name, grp: grp, det: det, dl: dl, w: Math.max(w1, w2, w3), h: h1 + lgap + h2 + h3, h1: h1, h2: h2, h3: h3, lgap: lgap };
                 }
                 function placeBlocks(R, P, nodes, eds) {
                   const blocks = {};
@@ -29903,9 +30054,10 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
                     blocks[k] = {
                       x: bx.x, y: bx.y, w: bx.w, h: bx.h,
                       cx: bx.x + bx.w / 2, cy: bx.y + bx.h / 2, psi: best.psi,
-                      name: sz.name, grp: sz.grp,
+                      name: sz.name, grp: sz.grp, dl: sz.dl || [],
                       nameCy: bx.y + sz.h1 / 2,
-                      groupCy: sz.grp ? (bx.y + bx.h - sz.h2 / 2) : null
+                      groupCy: sz.grp ? (bx.y + sz.h1 + sz.lgap + sz.h2 / 2) : null,
+                      detY0: bx.y + sz.h1 + sz.lgap + sz.h2 + ((sz.dl && sz.dl.length) ? (3 + 10) : 0)
                     };
                     placed.push(bx);
                   }
@@ -30046,11 +30198,16 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
             const _ox = scene.ox, _oy = scene.oy;
             /* v4.9.444:柔和投影滤镜(节点标签块/中心盘共用) */
             out.push('<defs><filter id="rdSoft" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="1" stdDeviation="1.6" flood-color="#1a2230" flood-opacity="0.13"/></filter></defs>');
-            const _rootG = scene.rootGroup ? _groupOf(scene.rootGroup) : '#2f6f4f';
-            /* 中心盘柔光:先画,线自盘边起笔覆盖其上,只在连线缝隙露出,不影响连线可见性 */
-            out.push('<circle cx="' + _ox.toFixed(1) + '" cy="' + _oy.toFixed(1) + '" r="' + (scene.rootR + 6).toFixed(1) + '" fill="' + _rootG + '" opacity="0.13"/>');
             const _byKey = {};
             ns.forEach((x, i) => { _byKey[keyOf(x, i)] = x; });
+            /* v4.9.486:根节点(度最高者=中心盘)同样吃可选 color / detail / tip */
+            const _rootRaw = _byKey[scene.rootKey] || {};
+            const _rootTip = String(_rootRaw.tip || '').trim();
+            const _rootDL = String(_rootRaw.detail || '').trim()
+              ? _wrap(String(_rootRaw.detail).trim(), 9, Math.max(96, est(scene.rootName, 13.5) + 20)) : [];
+            const _rootG = _relNodeCol(_rootRaw) || (scene.rootGroup ? _groupOf(scene.rootGroup) : '#2f6f4f');
+            /* 中心盘柔光:先画,线自盘边起笔覆盖其上,只在连线缝隙露出,不影响连线可见性 */
+            out.push('<circle cx="' + _ox.toFixed(1) + '" cy="' + _oy.toFixed(1) + '" r="' + (scene.rootR + 6).toFixed(1) + '" fill="' + _rootG + '" opacity="0.13"/>');
             /* 边:直线,端点处从圆点边界起笔;线上标签 + hover 详情 */
             const _edgeList = [];
             scene.edges.forEach(e => {
@@ -30074,24 +30231,52 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
             });
             out.push('<style>.rd-rel-grp .rd-rel-line{transition:stroke-width .15s,opacity .15s}.rd-rel-grp .rd-rel-tag{transition:filter .15s,stroke-width .15s}.rd-rel-grp:hover .rd-rel-line{stroke-width:2.8;opacity:1}.rd-rel-grp:hover .rd-rel-tag{filter:drop-shadow(0 1px 4px rgba(0,0,0,.25));stroke-width:1.5}</style>');
             /* v4.9.443:中心盘(度最高者居中)+ 节点圆点与标签块(名字/分组两行,方位自适应紧贴端点) */
+            /* v4.9.486:盘内文字改为整块垂直居中排布(名字/分组/可选 detail),并挂根节点的 tip 悬浮 */
+            const _rootLines = [{ t: scene.rootName, fs: 13.5, fw: 1, fill: '#fff', lh: 16 }];
+            if (scene.rootGroup) _rootLines.push({ t: scene.rootGroup, fs: 9.5, fw: 0, fill: '#dfeee4', lh: 13 });
+            _rootDL.forEach(t2 => _rootLines.push({ t: t2, fs: 9, fw: 0, fill: '#eaf5ee', lh: 11 }));
+            const _rootH = _rootLines.reduce((s, l) => s + l.lh, 0);
+            let _ry = _oy - _rootH / 2;
+            out.push('<g>' + (_rootTip ? ('<title>' + esc(_rootTip) + '</title>') : ''));
             out.push('<circle cx="' + _ox.toFixed(1) + '" cy="' + _oy.toFixed(1) + '" r="' + scene.rootR.toFixed(1) + '" fill="' + _rootG + '" filter="url(#rdSoft)"/>');
-            if (scene.rootGroup) {
-              out.push('<text x="' + _ox.toFixed(1) + '" y="' + (_oy - 3).toFixed(1) + '" font-size="13.5" fill="#fff" text-anchor="middle" font-weight="600"' + rdArtJumpAttr(_byKey[scene.rootKey]) + '>' + esc(scene.rootName) + '</text>');
-              out.push('<text x="' + _ox.toFixed(1) + '" y="' + (_oy + 13).toFixed(1) + '" font-size="9.5" fill="#dfeee4" text-anchor="middle">' + esc(scene.rootGroup) + '</text>');
-            } else {
-              out.push('<text x="' + _ox.toFixed(1) + '" y="' + (_oy + 5).toFixed(1) + '" font-size="13.5" fill="#fff" text-anchor="middle" font-weight="600"' + rdArtJumpAttr(_byKey[scene.rootKey]) + '>' + esc(scene.rootName) + '</text>');
-            }
+            _rootLines.forEach((l, li) => {
+              _ry += l.lh;
+              out.push('<text x="' + _ox.toFixed(1) + '" y="' + (_ry - l.lh / 2 + l.fs / 3).toFixed(1) + '" font-size="' + l.fs + '" fill="' + l.fill + '" text-anchor="middle"' + (l.fw ? ' font-weight="600"' : '') + (li === 0 ? rdArtJumpAttr(_rootRaw) : '') + '>' + esc(l.t) + '</text>');
+            });
+            out.push('</g>');
             scene.nodes.forEach(nd => {
               if (nd.root) return;
               const x = _byKey[nd.key] || {};
-              const gcol = x.group ? _groupOf(x.group) : '#a54a6f';
+              const gcol = _relNodeCol(x) || (x.group ? _groupOf(x.group) : '#a54a6f'); /* v4.9.486:节点 color 覆盖分组色 */
+              const _tip = String(x.tip || '').trim();
+              out.push('<g>' + (_tip ? ('<title>' + esc(_tip) + '</title>') : ''));
               out.push('<circle cx="' + (nd.x + _ox).toFixed(1) + '" cy="' + (nd.y + _oy).toFixed(1) + '" r="8" fill="#fff" stroke="' + gcol + '" stroke-width="2"/>');
               const b = scene.blocks[nd.key];
-              if (!b) return;
-              const _jk = rdArtJumpAttr(x);
-              out.push('<rect x="' + (b.x + _ox).toFixed(1) + '" y="' + (b.y + _oy).toFixed(1) + '" width="' + b.w.toFixed(1) + '" height="' + b.h.toFixed(1) + '" rx="5" fill="#fff" stroke="' + gcol + '66" stroke-width="1" filter="url(#rdSoft)"/>');
-              out.push('<text x="' + (b.cx + _ox).toFixed(1) + '" y="' + (b.nameCy + _oy + 4).toFixed(1) + '" font-size="12.5" fill="' + gcol + '" text-anchor="middle" font-weight="600"' + _jk + '>' + esc(b.name) + '</text>');
-              if (b.grp) out.push('<text x="' + (b.cx + _ox).toFixed(1) + '" y="' + (b.groupCy + _oy + 3.5).toFixed(1) + '" font-size="9.5" fill="#999" text-anchor="middle"' + _jk + '>' + esc(b.grp) + '</text>');
+              if (b) {
+                /* v4.9.488:标签被布点推到较远时(典型:内环节点的径向外侧正对外环节点端点,标签绕不过去只能外推),
+                   从端点圆边画一条同色细虚线连到标签框边,便于「哪个标签属于哪个点」一眼对上;只加线、不动布点算法 */
+                const _ldx = b.cx - nd.x, _ldy = b.cy - nd.y;
+                const _ldd = Math.hypot(_ldx, _ldy);
+                if (_ldd > 1) {
+                  const _lux = _ldx / _ldd, _luy = _ldy / _ldd;
+                  const _ltx = Math.abs(_lux) > 1e-6 ? (b.w / 2) / Math.abs(_lux) : Infinity;
+                  const _lty = Math.abs(_luy) > 1e-6 ? (b.h / 2) / Math.abs(_luy) : Infinity;
+                  const _lt = Math.min(_ltx, _lty);
+                  if (_ldd - _lt - 8 > 10) { /* 端点圆半径 8 之外的净间隙大于 10px 才画,近距离标签不画 */
+                    out.push('<line x1="' + (nd.x + _lux * 8 + _ox).toFixed(1) + '" y1="' + (nd.y + _luy * 8 + _oy).toFixed(1) +
+                      '" x2="' + (b.cx - _lux * _lt + _ox).toFixed(1) + '" y2="' + (b.cy - _luy * _lt + _oy).toFixed(1) +
+                      '" stroke="' + gcol + '" stroke-width="1" stroke-dasharray="3 3" stroke-linecap="round" opacity="0.45"/>');
+                  }
+                }
+                const _jk = rdArtJumpAttr(x);
+                out.push('<rect x="' + (b.x + _ox).toFixed(1) + '" y="' + (b.y + _oy).toFixed(1) + '" width="' + b.w.toFixed(1) + '" height="' + b.h.toFixed(1) + '" rx="5" fill="#fff" stroke="' + gcol + '66" stroke-width="1" filter="url(#rdSoft)"/>');
+                out.push('<text x="' + (b.cx + _ox).toFixed(1) + '" y="' + (b.nameCy + _oy + 4).toFixed(1) + '" font-size="12.5" fill="' + gcol + '" text-anchor="middle" font-weight="600"' + _jk + '>' + esc(b.name) + '</text>');
+                if (b.grp) out.push('<text x="' + (b.cx + _ox).toFixed(1) + '" y="' + (b.groupCy + _oy + 3.5).toFixed(1) + '" font-size="9.5" fill="#999" text-anchor="middle"' + _jk + '>' + esc(b.grp) + '</text>');
+                if (b.dl && b.dl.length) b.dl.forEach((t2, li) => {
+                  out.push('<text x="' + (b.cx + _ox).toFixed(1) + '" y="' + (b.detY0 + _oy + li * 12).toFixed(1) + '" font-size="9" fill="#8a8a8a" text-anchor="middle">' + esc(t2) + '</text>');
+                });
+              }
+              out.push('</g>');
             });
             /* v4.9.450:关系明细画进 SVG 内部（原挂在 svg 外的 HTML，「下载为图片」只序列化 svg，明细丢失  反馈的 bug）；画布高宽同步扩高 */
             if (_edgeList.length) {
@@ -30133,29 +30318,55 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
           const _depthCols = ['#2f6f4f', '#4a6fa5', '#a5824a', '#7a4aa5', '#a54a6f', '#666'];
           const rows = [];
           if (t === 'outline' && Array.isArray(j.items)) {
-            j.items.forEach(it => {
-              const d = Math.max(1, Math.min(6, parseInt(it && it.depth, 10) || 1));
+            /* v4.9.486:大纲改为「HTML 列表 + 树形连接线」——祖先层画延续竖线 │,当前层画 ├/└;depth 颜色仍按层着色(画在连接符上) */
+            const _items = j.items;
+            const _dep = (it) => Math.max(1, Math.min(6, parseInt(it && it.depth, 10) || 1));
+            /* 从第 i 条往后,层级 L 是否还有同级兄弟(用于决定 ├/└ 与竖线是否延续) */
+            const _moreSib = (i, L) => {
+              for (let j2 = i + 1; j2 < _items.length; j2++) {
+                const dj = _dep(_items[j2]);
+                if (dj < L) return false;
+                if (dj === L) return true;
+              }
+              return false;
+            };
+            _items.forEach((it, _i) => {
+              const d = _dep(it);
               const _n1 = (it && it.chapter != null && String(it.chapter) !== '') ? parseInt(it.chapter, 10) : NaN;
               const _f1 = (it && it.fl != null && String(it.fl) !== '') ? String(it.fl) : '';
               const _dc = _depthCols[(d - 1) % _depthCols.length];
-              const _jk1 = (_n1 > 0) ? (' data-rd-jump="' + (_n1 - 1) + '"' + (_f1 ? (' data-rd-jump-fl="' + escAttr(_f1) + '"') : '') + ' title="跳到第 ' + _n1 + ' 章' + (_f1 ? (' 第 ' + _f1 + ' 段') : '') + '"') : '';
+              const _tip1 = String((it && it.tip) || '').trim();
+              const _det1 = String((it && it.detail) || '').trim();
+              const _ttl1 = [_tip1, (_n1 > 0 ? ('跳到第 ' + _n1 + ' 章' + (_f1 ? (' 第 ' + _f1 + ' 段') : '')) : '')].filter(Boolean).join(' · ');
+              const _jk1 = ((_n1 > 0) ? (' data-rd-jump="' + (_n1 - 1) + '"' + (_f1 ? (' data-rd-jump-fl="' + escAttr(_f1) + '"') : '')) : '') + (_ttl1 ? (' title="' + escAttr(_ttl1) + '"') : '');
               const ch = (_n1 > 0) ? ('<span style="color:#999;font-size:11px">[第' + _n1 + '章]</span> ') : '';
-              /* v4.9.407: 修复双 style 冲突 —— _jk1 原来带 style="cursor:pointer",后面又拼 style="font-weight..."，两个 style 属性浏览器只认第一个 (加粗/着色全丢) */
+              /* 树形连接线:d=1 无连接符;列 2..d-1 为祖先延续线 │(无色)、列 d 为分支 ├/└(按层着色) */
+              let _tree = '';
+              for (let L = 2; L <= d; L++) {
+                if (L === d) _tree += '<span style="display:inline-block;width:12px;color:' + _dc + ';user-select:none">' + (_moreSib(_i, d) ? '├' : '└') + '</span>';
+                else _tree += '<span style="display:inline-block;width:12px;color:#d6d6d6;user-select:none">' + (_moreSib(_i, L) ? '│' : ' ') + '</span>';
+              }
+              /* v4.9.407: 修复双 style 冲突 —— 两个 style 属性浏览器只认第一个(加粗/着色全丢) */
               const _sp1 = 'style="' + (_n1 > 0 ? 'cursor:pointer;' : '') + (d === 1 ? 'font-weight:700;color:' + _dc + ';font-size:13px' : '') + '"';
-              rows.push('<div style="padding:3px 0 3px 10px;margin:2px 0 2px ' + ((d - 1) * 14) + 'px;border-left:3px solid ' + _dc + (d === 1 ? '' : '55') + ';border-radius:0 4px 4px 0;' + (d === 1 ? 'background:' + _dc + '0d;font-weight:700' : '') + '">' +
-                '<span' + _jk1 + ' ' + _sp1 + '>' + ch + escHtml(String((it && it.text) || '')) + '</span></div>');
+              rows.push('<div style="padding:3px 0 3px 8px;margin:2px 0;border-radius:0 4px 4px 0;' + (d === 1 ? 'background:' + _dc + '0d;' : '') + '">' +
+                _tree + '<span' + _jk1 + ' ' + _sp1 + '>' + ch + escHtml(String((it && it.text) || '')) + '</span>' +
+                (_det1 ? ('<div style="color:#8a8a8a;font-size:11px;line-height:1.5;margin:1px 0 0 12px">' + escHtml(_det1) + '</div>') : '') + '</div>');
             });
           } else {
             const arr = (t === 'timeline') ? (j.events || []) : (j.nodes || []);
             arr.forEach((it, i) => {
               const _n2 = (it && it.chapter != null && String(it.chapter) !== '') ? parseInt(it.chapter, 10) : NaN;
               const _f2 = (it && it.fl != null && String(it.fl) !== '') ? String(it.fl) : '';
-              const _jk2 = (_n2 > 0) ? (' data-rd-jump="' + (_n2 - 1) + '"' + (_f2 ? (' data-rd-jump-fl="' + escAttr(_f2) + '"') : '') + ' title="跳到第 ' + _n2 + ' 章' + (_f2 ? (' 第 ' + _f2 + ' 段') : '') + '"') : '';
+              const _tip2 = String((it && it.tip) || '').trim();
+              const _det2 = String((it && it.detail) || '').trim();
+              const _ttl2 = [_tip2, (_n2 > 0 ? ('跳到第 ' + _n2 + ' 章' + (_f2 ? (' 第 ' + _f2 + ' 段') : '')) : '')].filter(Boolean).join(' · ');
+              const _jk2 = ((_n2 > 0) ? (' data-rd-jump="' + (_n2 - 1) + '"' + (_f2 ? (' data-rd-jump-fl="' + escAttr(_f2) + '"') : '')) : '') + (_ttl2 ? (' title="' + escAttr(_ttl2) + '"') : '');
               const ch = (_n2 > 0) ? ('<span style="color:#999;font-size:11px">[第' + _n2 + '章]</span> ') : '';
-              rows.push('<div style="margin:1px 0;padding:1px 0"><span' + _jk2 + '>' + (t === 'timeline' ? ('<span style="color:' + _tCol + ';font-weight:600">' + (i + 1) + '.</span> ') : '') + ch + escHtml(String((it && (it.label || it.text)) || '')) + (it && it.kind ? (' <span style="background:' + _tCol + '18;color:' + _tCol + ';border-radius:3px;padding:0 5px;font-size:11px">' + escHtml(String(it.kind)) + '</span>') : '') + '</span></div>');
+              rows.push('<div style="margin:1px 0;padding:1px 0"><span' + _jk2 + '>' + (t === 'timeline' ? ('<span style="color:' + _tCol + ';font-weight:600">' + (i + 1) + '.</span> ') : '') + ch + escHtml(String((it && (it.label || it.text)) || '')) + (it && it.kind ? (' <span style="background:' + _tCol + '18;color:' + _tCol + ';border-radius:3px;padding:0 5px;font-size:11px">' + escHtml(String(it.kind)) + '</span>') : '') + '</span>' +
+                (_det2 ? ('<div style="color:#8a8a8a;font-size:11px;line-height:1.5;margin:1px 0 0 12px">' + escHtml(_det2) + '</div>') : '') + '</div>');
             });
             if (t === 'relations' && Array.isArray(j.edges) && j.edges.length) {
-              rows.push('<div style="color:#8a8a8a;margin-top:4px;font-size:11.5px;border-top:1px dashed #ddd;padding-top:4px">关系:' + j.edges.slice(0, 30).map(e => escHtml(String((e && e.a) || '')) + '—' + escHtml(String((e && e.label) || '?')) + '—' + escHtml(String((e && e.b) || ''))).join('、') + '</div>');
+              rows.push('<div style="color:#8a8a8a;margin-top:4px;font-size:11.5px;border-top:1px dashed #ddd;padding-top:4px">关系:' + j.edges.slice(0, 30).map(e => escHtml(String((e && e.a) || '')) + '—' + escHtml(String((e && e.label) || '?')) + '—' + escHtml(String((e && e.b) || '')) + ((e && e.since) ? ('(' + escHtml(String(e.since)) + ')') : '')).join('、') + '</div>');
             }
           }
           const _svg = rdArtSvg(j, { id: String((o && o.id) || '') });
@@ -30533,7 +30744,7 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
           return '\n· **本书现有产物(' + _b.length + ' 件)**:' + _show + _more + ' —— 产出新产物块前先对照:是**升级其中某件**还是**新建**(见下条准则)✓。';
         } catch (e) { return ''; }
       };
-      const rdArtifactDecl = () => '\n\n【结构化产物(可选)】当你给出**' + RD_ART_NAMES + '**这类结构性结果时,别只写文字 —— 在回答里单独放一个标记块,程序会把它**存进本书的「AI 产物库」并渲染成卡片**(以后可复用的是它,不是这次的文字):\n[[ARTIFACT]]\n{"type":"outline","title":"…","items":[{"depth":1,"text":"…","chapter":5,"fl":12}]}\n[[/ARTIFACT]]\n· type 只能取 ' + RD_ART_TYPE_LIST.join(' / ') + ';各自数据键:' + RD_ART_SPECS + '。\n· **能标就标 chapter(章序号)与 fl(段号)** —— 标了以后点它就能跳回原文那一段。\n· 一个回答里可以给多个标记块;块里必须是**合法 JSON**(不要写注释、不要在块里混别的话)。\n' + rdArtIdxLine() + '\n· **产出任何产物块之前,先按下面准则定「升级 or 新建」**(对照上面那份现有清单;要看某件完整内容再 get_artifact(#id)):①同 type 且**对象/主题一致**(同一本书的主角关系图)⇒ **升级**(块里**带上那个 id**,形如 {"id":"a12",…})⇒ 更新那一件(版本 +1、旧版留着可回退 ✓);②同 type 但**范围不同**("第1-5章大纲" vs "全书大纲")⇒ **新建**;③**同一份东西的补充/细化** ⇒ **升级**;④**拿不准就新建**(宁可多一件,绝不误合并 ✓)。**不带 id = 新建**一件。\n· **小改就发「补丁」,别整份重发**(省 token、也不容易改丢):块里写 {"type":"outline","id":"a12","patch":true,"items":[…]},items 里**只放要改的那几条**,每条按 k 认:①带 "k":5 = 把写的字段**改到**库里那条 k=5 上(没写的字段保持原样);②**不带 k** = 追加一条(自动给新 k);③带 "k":5 且 "del":true = 删除那条。⚠ k 是它在库里的**稳定序号**(get_artifact 能看到),插入/删除都不移位;补丁必须带**已存在**的 id,且 k 必须对得上 —— **对不上整块作废**(不新建也不改库,回答末尾会提示)⇒ 改之前先 get_artifact 拿最新 k ✓。\n· 要**删**产物 ⇒ 调 **delete_artifact(#id)**(只对该书自己的产物有效 ✓);它会进**回收站**,用户在 📚 里可恢复 ✓。**只在用户明确说要删时才删** ✗。';
+      const rdArtifactDecl = () => '\n\n【结构化产物(可选)】当你给出**' + RD_ART_NAMES + '**这类结构性结果时,别只写文字 —— 在回答里单独放一个标记块,程序会把它**存进本书的「AI 产物库」并渲染成卡片**(以后可复用的是它,不是这次的文字):\n[[ARTIFACT]]\n{"type":"outline","title":"…","items":[{"depth":1,"text":"…","chapter":5,"fl":12}]}\n[[/ARTIFACT]]\n· type 只能取 ' + RD_ART_TYPE_LIST.join(' / ') + ';各自数据键:' + RD_ART_SPECS + '。\n· **思维导图要做出层次** —— 用 parent 串成多层(一般至少 3 层:主题 → 分支 → 细节),别把节点全挂在根上 ✗;同层可用 order 指定顺序。\n· **能标就标 chapter(章序号)与 fl(段号)** —— 标了以后点它就能跳回原文那一段。\n· 一个回答里可以给多个标记块;块里必须是**合法 JSON**(不要写注释、不要在块里混别的话)。\n' + rdArtIdxLine() + '\n· **产出任何产物块之前,先按下面准则定「升级 or 新建」**(对照上面那份现有清单;要看某件完整内容再 get_artifact(#id)):①同 type 且**对象/主题一致**(同一本书的主角关系图)⇒ **升级**(块里**带上那个 id**,形如 {"id":"a12",…})⇒ 更新那一件(版本 +1、旧版留着可回退 ✓);②同 type 但**范围不同**("第1-5章大纲" vs "全书大纲")⇒ **新建**;③**同一份东西的补充/细化** ⇒ **升级**;④**拿不准就新建**(宁可多一件,绝不误合并 ✓)。**不带 id = 新建**一件。\n· **小改就发「补丁」,别整份重发**(省 token、也不容易改丢):块里写 {"type":"outline","id":"a12","patch":true,"items":[…]},items 里**只放要改的那几条**,每条按 k 认:①带 "k":5 = 把写的字段**改到**库里那条 k=5 上(没写的字段保持原样);②**不带 k** = 追加一条(自动给新 k);③带 "k":5 且 "del":true = 删除那条。⚠ k 是它在库里的**稳定序号**(get_artifact 能看到),插入/删除都不移位;补丁必须带**已存在**的 id,且 k 必须对得上 —— **对不上整块作废**(不新建也不改库,回答末尾会提示)⇒ 改之前先 get_artifact 拿最新 k ✓。\n· 要**删**产物 ⇒ 调 **delete_artifact(#id)**(只对该书自己的产物有效 ✓);它会进**回收站**,用户在 📚 里可恢复 ✓。**只在用户明确说要删时才删** ✗。';
       const rdTools = []; // 本次回答的工具调用记录(渲染用,含可跳转的章节)
       // ---- v4.9.140:工具设置(各工具开关 + 可编辑说明;「格式声明」固定不可改) ----
       const RD_TOOLS_KEY = 'esj_rd_tools_v1';
@@ -30544,11 +30755,19 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
         read_around: '· read_around 章号,段号 —— 读该段前后各5段的原文与译文。\n↳ 用法:**范围可以自己定**:段号写区间(如 100-140)就按这一段读,或写 radius=12(前后各12段,最多15);单次最多 80 段,想通读整章就分两次读;**某段话看不懂、或要看某场景的完整上下文时用它**。\n⚠ 注意:**段号别乱猜** —— 某章多少段,list_chapters 每行末尾和 search_book 每条结果里都标着(段号超出章末只会白费一轮)',
         list_chapters: '· list_chapters —— 本书章节清单(纯目录 + 段数,不含摘要)。\n↳ 用法:每章标着 [N段] 或 [未读],[N段] = 该章一共多少段(规划 read_around 段号用);**想知道"哪一章讲了什么"要用 chapter_summary**。\n⚠ 注意:含序章/番外时,"目录序号"会与"第N话"错位',
         get_terms: '· get_terms —— 本书人名/专名的固定译法',
-        list_artifacts: '· list_artifacts —— 本书已生成的「AI 产物」(大纲/思维导图/人物关系/时间线)清单。\n↳ 用法:不带参数;每行形如 #a12 大纲「标题」· N 项。**想复用以前生成的东西,先调它**。\n⚠ 注意:清单只是索引 —— 看内容要继续 get_artifact(#id)。**小改别整份重发**:带上 id 和 "patch":true,数据数组里只放要改的条目(带 k=改那条、不带 k=新增、带 "k"+"del":true=删那条)✓',
-        get_artifact: '· get_artifact #id —— 取回某件产物的完整 JSON(含它的 id ✓)。\n↳ 用法:参数就是 list_artifacts 里的 #a12 这种 id(可省略 #)。取回后**在它基础上改**(增删节点/事件),再按【结构化产物】的格式输出一次,并且**把 id 一起写回**(形如 {"id":"a12",…})⇒ **更新那一件** ✓(不带 id 就变成新建一件 ✗)。\n⚠ 注意:产物是**派生数据**、不是原文 —— 涉及"原文到底怎么说"仍要走 search_book / read_around。**改它优先发补丁**(块里加 "patch":true,只放要改的条目并用 k 指认;k 对不上整块作废 ⇒ 改之前务必先取最新版)✓',
+        list_artifacts: '· list_artifacts —— 本书已生成的「AI 产物」(大纲/思维导图/人物关系/时间线)清单。\n↳ 用法:不带参数;每行形如 #a12 大纲「标题」· N 项。**想复用以前生成的东西,先调它**。\n⚠ 注意:清单只是索引 —— 看内容要继续 get_artifact(#id)(条目多会自动分页,可再调一次取后一段)。**小改别整份重发**:带上 id 和 "patch":true,数据数组里只放要改的条目(带 k=改那条、不带 k=新增、带 "k"+"del":true=删那条)✓',
+        get_artifact: '· get_artifact #id[,范围] —— 取回某件产物的 JSON(含它的 id ✓);**条目多会自动分页**,一次给一段。\n↳ 用法:第一个参数是 list_artifacts 里的 #a12 这种 id(可省略 #)。返回会标「共 N 条 / 本页第 X–Y 条」;要接着看后一段,**第二个参数写条号范围**再调一次(如 get_artifact(a12,41-80);写单个数字=从该条起往后取一页)。取回后**在它基础上改**(增删节点/事件),**把 id 一起写回**(形如 {"id":"a12",…})⇒ **更新那一件** ✓(不带 id 就变成新建一件 ✗)。\n⚠ 注意:产物是**派生数据**、不是原文 —— 涉及"原文到底怎么说"仍要走 search_book / read_around。**改它优先发补丁**(块里加 "patch":true,只放要改的条目并用 k 指认;k 对不上整块作废 ⇒ 改之前务必先取最新版、k 以最新一次取回的为准)✓;分页返回的是**节选**,**别把节选整份回写**(会丢掉没看到的条目)✗。',
         delete_artifact: '· delete_artifact #id —— 删除某件产物(**移入回收站,用户可恢复** ✓)。\n↳ 用法:参数是产物 id(可省略 #)。**只在用户明确说要删/不要了的时候才调** ✗;删完在回答里说清删了哪一件 ✓。',
         __optline: '选项(可省略,不填就用用户的检索设置):scope=orig(只搜原文)|trans(只搜译文)|both(原文+译文)、range=near(当前章±5)|all(全书;near 零命中会自动扩到全书)|章号(只搜这一章,如 49 或 第49章)|章号区间(只搜这几章,如 49-52)、count=1..20(结果段数)、len=80..1200(每段片段字数)',
-        __rules: '【规矩】① 问"某一章讲了什么 / 第几章 / 哪一话"必须先调 chapter_summary 或 list_chapters 核对,**不得用当前章上下文冒充其它章**;**别只看当前章与已读章节 —— 要判断全局情况(某人/某事在全书里如何),{LATERCH}**;② 同义词最多换 2 次;**摘要与检索片段都只是索引、不是依据**(摘要写"暗恋",原文可能只是"在意" —— 程度、语气、关系定性都不能凭它下结论);**命中段号后先 read_around 回读原文再下结论**,别只凭片段猜;③ 最多 {ROUNDS} 轮工具调用,之后必须直接回答(不要把调用行当答案输出);④ 当前防剧透档位下,{SPOILER}。⑤ 恰当使用上面给出的各种工具,尽可能把信息查全(不要只靠单一工具或已读内容作答);⑥ **凡结论涉及"这句话是谁说的 / 人物之间是什么关系",必须先 read_around 回读该段原文、核对说话人**(看紧邻上下段的引号归属、称谓与语气),不得凭单个检索片段张冠李戴;回读后仍确定不了就先写"需回读确认",不要硬下定性;⑦ **调用工具前不要先输出完整答案**(别"先答一遍、调完工具再答一遍");工具返回后只输出**一次**最终答案,不要复述上文。',
+        /* v4.9.484:③ 补「上限≠必须用满 / 信息够答就停手」
+           —— 用户提议新增【规矩】⑤("使用多种工具、够就停、但也不能随便查一下"),
+              因前半与②「多种工具换着用」重叠、且"多查"与"够就停"表面矛盾,故不新增第 5 条,把⑤精神并入③;
+              同时明确"够"的门槛仍以①为准(引文归属/语气/关系定性必须 read_around),概述题则可直接答
+           v4.9.485:③ 改为「证据标准」式 —— 去掉"按题型定次数"的表述(题型↔次数无稳定映射、且与②重复),
+              换成统一的"够不够回答"标准(a 每个事实点有原文/检索支撑 / b 引文·语气·关系定性须 read_around /
+              c 命中互相印证、无关键空白),达成就停、未达成继续换工具/换范围 ⇒ 调几次由标准推导、由模型自己规划;
+              ① 顺带精简:去掉与③重复的"程度/语气/关系定性不能凭片段"那半句,只留"摘要只是索引" */
+        __rules: '【规矩】① **事实性结论(某章讲什么 / 这句话谁说的 / 两人什么关系)必须有原文依据** —— 先 list_chapters / chapter_summary 定位,再 read_around 回读原文(看清紧邻上下段的引号归属、称谓与语气);**摘要只是索引、不是依据**;定不了就写"需确认",不要硬猜、更不要张冠李戴。② **多种工具换着用**:不同问题挑不同工具 —— 定位章回用 list_chapters / chapter_summary、读原文用 read_around、找关键词用 search_book,需要时组合着来;**别只在 search_book 里反复换词碰运气** —— 一个工具试过没结果,就换个工具或换个范围(改章号 / range / count)再查;判断全局(某人/某事在全书里如何)别只看当前章与已读章节,{LATERCH}。③ 最多 {ROUNDS} 轮工具调用——**这是上限,不是必须用满:调几次由"查够没有"决定,不按题型定**;**先查后答**(调工具前不要先写整段答案);**写完调用行就停,不要自己编造工具返回**(结果由系统在下一轮给你);**判断"够不够回答"的标准 —— 达成就停,不必硬凑轮数**:(a) 你要下结论的每个事实点都已由**检索结果 / 原文**支撑;(b) 涉及引号归属 / 语气 / 关系定性,必须 read_around 回读原文,不能只凭片段;(c) 命中之间互相印证、无关键空白;未达成就换工具 / 换范围接着查,仍查不到就写"需确认"、别硬编;工具返回后只输出**一次**最终答案(不要把调用行当答案,也别复述上文)。④ 当前防剧透档位下,{SPOILER}。',
         // v4.9.461:引用提示模板(右键「引用此段到提问」后拼在提问里;可在「🧰 工具设置」改)
         //   占位符:{REFS}=引用位置列表、{CH}/{FL}=引用首段章号/段号、{TOOLS}…{/TOOLS} 仅在「允许 AI 翻书检索」开启时保留
         /* v4.9.463(②④):① 消除"原文已附"与"先 read_around 回读该段"的自相矛盾
@@ -30754,13 +30973,39 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
         }
         if (_k0 === 'get_artifact') {
           const _bB = rdArtBucket((st && st.novelId) || 'local');
-          const _id = String(argRaw || '').replace(/[^0-9A-Za-z]/g, '').toLowerCase();
+          const _gh = String(argRaw || '').split(/[,，\s]+/).filter(Boolean);
+          const _id = String(_gh[0] || '').replace(/[^0-9A-Za-z]/g, '').toLowerCase();
           const _o = _id ? _bB.filter(x => x && (String(x.id || '').toLowerCase() === _id || (_id.length >= 3 && String(x.id || '').toLowerCase().indexOf(_id) === 0)))[0] : null;
           if (!_o) return { label: 'get_artifact(' + _id + ')', text: '(没找到这个 id 的产物 —— 先调 list_artifacts 看清单)', jumps: [] };
-          let _js = '';
-          try { _js = JSON.stringify(_o.json || {}, null, 1); } catch (e) { _js = '(读取失败)'; }
-          const _cut = _js.length > 6000;
-          return { label: 'get_artifact(' + _o.id + ')', text: '【产物 ' + rdArtLabel(_o) + ' · 当前 v' + (parseInt(_o.ver, 10) || 1) + '】\n' + (_cut ? (_js.slice(0, 6000) + '\n…(太长已截断 —— 靠后的条目看不到 k;要改靠后的话先让用户缩小产物,或退而求其次整份重发)') : _js) + '\n\n要改它:把上面的 id **一起写回**标记块(形如 {"id":"' + String(_o.id || '') + '",…})⇒ 更新这一件(v+1,旧版留档可回退 ✓)。\n**只改几条就发补丁**(块里加 "patch":true,数据数组只放要改的条目,用上面的 k 指认:带 k=改那条、不带 k=新增、带 "k"+"del":true=删那条;k 对不上整块作废)。', jumps: [] };
+          /* v4.9.470:分页取回。原来整份 JSON 硬截断在 6000 字符,大产物的靠后条目(及其 k)模型根本看不到,
+             "改靠后条目"于是办不到。改成按**条数**分页:一次给一段(塞到字符预算为止、绝不切半条),
+             并明确告知总条数与下一段的调用写法(第二个参数给范围,如 get_artifact(a12,41-80))。 */
+          const _j = _o.json || {};
+          const _ak = rdArtArrKey(_j.type);
+          const _arr = Array.isArray(_j[_ak]) ? _j[_ak] : [];
+          const _n = _arr.length;
+          let _body = '', _page = '', _more = false, _range = '';
+          if (!_n) {
+            let _js = ''; try { _js = JSON.stringify(_j, null, 1); } catch (e) { _js = '(读取失败)'; }
+            _body = (_js.length > 6000) ? (_js.slice(0, 6000) + '\n…(太长已截断)') : _js;
+          } else {
+            const _gh1 = String(_gh[1] || '').replace(/[^0-9\-~～]/g, '').replace(/[~～]/g, '-');
+            let _s = 1, _e = _n;
+            const _rm = _gh1 ? _gh1.match(/^(\d+)-(\d+)$/) : null;
+            if (_rm) { _s = Math.max(1, parseInt(_rm[1], 10) || 1); _e = Math.min(_n, parseInt(_rm[2], 10) || _n); }
+            else if (_gh1 && /^\d+$/.test(_gh1)) { _s = Math.max(1, Math.min(_n, parseInt(_gh1, 10) || 1)); }
+            if (_e < _s) { const _t = _s; _s = _e; _e = _t; }
+            _s = Math.max(1, Math.min(_n, _s)); _e = Math.max(_s, Math.min(_n, _e)); // v4.9.470:越界/反写都收进 [1,_n](否则 _arr[i] 会是 undefined 直接抛错)
+            const _esc = (x) => { try { return JSON.stringify(x); } catch (e) { return '{}'; } };
+            const _acc = []; let _len = 0, _cur = _s;
+            for (; _cur <= _e; _cur++) { const _es = _esc(_arr[_cur - 1]); if (_acc.length && _len + _es.length + 4 > 5400) break; _acc.push(_es); _len += _es.length + 4; }
+            const _pe = _cur - 1;
+            _more = _pe < _e;
+            _body = '{\n "type": ' + JSON.stringify(_j.type || '') + ',\n "title": ' + JSON.stringify(_j.title || '') + ',\n "' + _ak + '": [\n  ' + _acc.join(',\n  ') + '\n ]\n}';
+            _page = ' · 本页第 ' + _s + '–' + _pe + ' 条' + (_more ? (',还有第 ' + (_pe + 1) + '–' + _e + ' 条 —— 继续调 get_artifact(' + String(_o.id || '') + ',' + (_pe + 1) + '-' + _e + ') 看/改它们') : '');
+            _range = _s + '-' + _pe; // v4.9.476:本次实际返回的条号区间(卡片标题要带上它)
+          }
+          return { label: 'get_artifact(' + _o.id + (_range ? (',' + _range) : '') + ')', text: '【产物 ' + rdArtLabel(_o) + ' · 当前 v' + (parseInt(_o.ver, 10) || 1) + (_n ? (' · 共 ' + _n + ' 条' + _page) : '') + '】\n' + _body + '\n\n要改它:把上面的 id **一起写回**标记块(形如 {"id":"' + String(_o.id || '') + '",…})⇒ 更新这一件(v+1,旧版留档可回退 ✓)。\n' + (_n ? ('⚠ 上面是**分页节选' + (_more ? '(不含全部条目)' : '(已含全部条目)') + '** —— 别把节选整份回写(会丢掉没看到的条目)。**只把要改的条目发补丁**:块里加 "patch":true,条目用上面的 k 指认(带 k=改那条、不带 k=新增、带 "k"+"del":true=删那条;k 对不上整块作废)。') : '') + '\n补充:一次取不全就**分批取**(第二个参数写条号范围,如 get_artifact(' + String(_o.id || '') + ',41-80));范围里写单个数字=从该条起往后取一页。', jumps: [] };
         }
         let args = {};
         let raw = String(argRaw || '').trim();
@@ -31173,21 +31418,71 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
              并要求优先围绕该段回答(该段原文已写在用户消息开头);开工具时再提示可用 read_around 回读前后文
              v4.9.461:文案改为可编辑模板(「🧰 工具设置」里的「引用提示」;占位符由 rdQuoteHintText 填) */
           const quoteHint = rdQuoteHintText(_quotes, useTools);
-          // 构建 messages:系统 + 最近N轮对话 + 当前问题(带上下文)
-          const histRounds = (chatPrefs && typeof chatPrefs.histRounds === 'number' && chatPrefs.histRounds > 0) ? chatPrefs.histRounds : 5;
+          // 构建 messages:系统 + 最近历史(按 token 预算截断) + 当前问题(带上下文)
+          /*  v4.9.472(「历史/上下文快要超 MAX token 时压缩上下文」):
+              原来只按「轮数」截断(histRounds 默认 5 轮) —— 轮数不等于体积:一轮可能是 AI 检索整本书后的长回答,
+              5 轮就能把上下文撑爆;反过来短问答时 5 轮又留得太少。而思考(reasoning)从不进历史(历史只取 m.content),
+              所以这里要管的只有「user/ai 正文」。
+              改为「按 token 预算截断」:histRounds 退化为**上限**(用户仍可限制最多几轮),
+              真正决定保留多少的是 token 预算 —— 从最新往回累加 estimateTokens(m.content),超预算就丢最早的,
+              且**至少保留最近一条**(哪怕它单独就超预算),避免历史被清空。 */
+          const RD_CHAT_HIST_TOKENS = (chatPrefs && typeof chatPrefs.histTokens === 'number' && chatPrefs.histTokens > 0) ? chatPrefs.histTokens : 6000; // 历史对话部分的 token 预算(不含 system / 当前提问 / 本章上下文)。v4.9.474:改为读设置项(原写死 6000)
+          const histRounds = (chatPrefs && typeof chatPrefs.histRounds === 'number' && chatPrefs.histRounds > 0) ? chatPrefs.histRounds : 20;
           const messages = [{ role: 'system', content: sys }];
-          // slice(0,-2) 去掉刚 push 的当前 user 消息和 pending AI 消息,只取之前的历史
-          const recent = conv.messages.slice(0, -2).slice(-histRounds * 2);
-          for (const m of recent) {
-            if (m.role === 'user' || m.role === 'ai') {
-              messages.push({ role: m.role === 'ai' ? 'assistant' : 'user', content: m.content || '' });
+          // slice(0,-2) 去掉刚 push 的当前 user 消息和 pending AI 消息,只取之前的历史;先按轮数上限取最近若干条
+          const _histCand = conv.messages.slice(0, -2).slice(-histRounds * 2).filter(m => m.role === 'user' || m.role === 'ai');
+          const _histKeep = [];
+          let _histTok = 0;
+          for (let _i = _histCand.length - 1; _i >= 0; _i--) {
+            const _t = estimateTokens(_histCand[_i].content || '');
+            if (_histTok + _t > RD_CHAT_HIST_TOKENS && _histKeep.length) break; // 超预算则丢弃更早的(至少留最近一条)
+            _histTok += _t;
+            _histKeep.unshift(_histCand[_i]);
+          }
+          for (const m of _histKeep) {
+            let _hc = m.content || '';
+            /* v4.9.475:这条回答产出了哪些产物(动作+版本),补进**发给模型的副本** ——
+               [[ARTIFACT]] 块入库后正文就被剥干净了(见 rdTakeArtifacts),模型看 system 清单只知道"本书有哪些产物",
+               不知道"上一条是我动的那件、动成了什么版本"。数据现成(m.arts / m.artMeta 随对话一起存),
+               只拼在副本上,不回写 m.content(否则聊天里会多出一行、还会被 chatSave 存回去)。 */
+            if (m.role === 'ai' && Array.isArray(m.arts) && m.arts.length) {
+              try {
+                const _am2 = m.artMeta || {};
+                const _bk2 = rdArtBucket((st && st.novelId) || 'local');
+                const _tags = m.arts.map(id => {
+                  const _md2 = _am2[String(id)] || {};
+                  const _o2 = _bk2.filter(x => x && x.id === id)[0];
+                  const _nm2 = _o2 ? ('#' + String(_o2.id) + ' ' + rdArtTypeName((_o2.json || {}).type) + '「' + String((_o2.json || {}).title || '(无标题)') + '」') : ('#' + String(id) + '(已删)');
+                  return (_md2.act === 'up' ? '升级' : '新建') + ' ' + _nm2 + ((_md2.ver > 1) ? (' → v' + _md2.ver) : '');
+                }).join('；');
+                if (_tags) _hc += '\n\n（本轮产物：' + _tags + '）';
+              } catch (e5) {}
             }
+            messages.push({ role: m.role === 'ai' ? 'assistant' : 'user', content: _hc });
           }
           /* v4.9.463(①):引用提示提到章节上下文之前 —— 原来 ctxText 在前、quoteHint 在后,
              长上下文会把"本次引用的是哪一段"这条最关键的指令淹掉，调整顺序(引用提示紧跟问题正文) */
           messages.push({ role: 'user', content: _qText + quoteHint + ctxText });
           // 保存完整上下文供调试查看(上下文按钮)
-          const debugCtx = messages.map(m => '【' + m.role + '】\n' + m.content).join('\n\n---\n\n');
+          /*  v4.9.473(用户反馈「这几轮改动不太好验收」):
+              历史截断是无形的 —— 从「🔍 上下文」里只能看到留下了哪几条,看不出**候选几条、裁掉几条、离预算还有多远**。
+              这里在最前面补一行汇总,让验收从"数段数"变成"看一眼":
+              候选 N 条(轮数上限) → 实留 M 条 · (按 token 预算裁掉 K 条 / 未超预算) · 约 X / 6000 token。 */
+          const _histDropped = _histCand.length - _histKeep.length;
+          /*  v4.9.478(总输入视角):
+              此前汇总只报历史那一段,而 system(工具全开约 2200 token)+本章上下文+引用正文都不在任何账上 ——
+              用户把 histTokens 往上调之后,总量会悄悄顶爆小上下文模型(8k/16k)而界面上完全看不出来。
+              这里直接对 messages 求和(与实际发出的完全一致),拆成 system / 历史 / 当前提问+本章上下文 三段。
+              注:中间那段的"历史"是 messages 求和的差值(含 10fx 补的产物注解),与下面一行按预算累加的 _histTok 可能差几个 token,属正常。 */
+          const _inTok = messages.reduce((_a2, _m2) => _a2 + estimateTokens(_m2.content || ''), 0);
+          const _sysTok = estimateTokens((messages[0] && messages[0].content) || '');
+          const _curTok = estimateTokens((messages[messages.length - 1] && messages[messages.length - 1].content) || '');
+          const _histSum = '【本轮输入 ≈ ' + _inTok + ' token · system ≈ ' + _sysTok
+            + ' ｜ 历史 ≈ ' + (_inTok - _sysTok - _curTok) + ' ｜ 当前提问+本章上下文 ≈ ' + _curTok + '】\n'
+            + '【历史保留 · 候选 ' + _histCand.length + ' 条(上限 ' + histRounds + ' 轮) → 实留 ' + _histKeep.length + ' 条 · '
+            + (_histDropped > 0 ? ('按 token 预算裁掉 ' + _histDropped + ' 条') : '未超预算')
+            + ' · 约 ' + _histTok + ' / ' + RD_CHAT_HIST_TOKENS + ' token】';
+          const debugCtx = _histSum + '\n\n---\n\n' + messages.map(m => '【' + m.role + '】\n' + m.content).join('\n\n---\n\n');
           // 构建请求体(支持多轮,流式),思考跟随 AI 设置全局档位
           const buildBody = (msgs) => {
             /*  v4.9.453(「仍然达到了上限」):
@@ -31206,21 +31501,37 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
           // 流式请求:实时更新思考过程和回答
           // v4.9.69:调用行必须从流式阶段就剥掉 —— 之前只在最后一步剥,中间那次渲染会把 [[TOOL:…]] 留在消息里并被 chatSave 存下来
           const stripToolLines = (s) => String(s == null ? '' : s).split('\n').filter(l => !/\[\[?\s*TOOL/i.test(l)).join('\n').replace(/\n{3,}/g, '\n\n').trim(); // v4.9.138:单方括号的调用行也剥掉
+          // v4.9.480:工具轮只留调用行 —— 模型常在调用行后面自写 `<result>` 之类的"伪造工具返回"(实测段数/格式与真实工具全不符),
+          //   回传给它自己看会自我强化、污染最终回答;界面灰块同理,只展示它真正要调的那几行。
+          const keepToolLines = (s) => String(s == null ? '' : s).split('\n').filter(l => /\[\[?\s*TOOL\s*[:：]/i.test(l)).map(l => l.trim()).filter(Boolean).join('\n');
           // v4.9.103:「剧透黑幕」的点击揭开改在 chatRender 末尾用容器事件委托绑定(见下),这里不再注册全局函数
           // v4.9.104:不再用行内 onclick(window.__rdSpoilerOpen) —— 油猴沙箱的 window 与页面 window 不同,行内事件根本调不到。
           const last = conv.messages[conv.messages.length - 1];
           if (last) last.ctxDebug = debugCtx; // v4.9.70:上下文一进来就写好 —— 之后无论成功/失败/空返回,「🔍 上下文」都在(此前只在成功路径末尾写,出错或空返回时就没了)
+          /* v4.9.483:「工具往返」文本统一从这里拼 —— 定义在工具循环之前,循环内每轮记完就写一次、末尾再兜底一次(两处共用)。
+             v4.9.481 曾把工具段单独拼在"成功末尾",可本轮一旦中途出错/被中止,last.ctxDebug 就停在上面那行快照
+             (只有 system+历史、没有工具段),用户实测「🔍 上下文」里压根看不到往返明细。挪成每轮都写即可根治。
+             注:debugCtx 是从循环前的 messages 算的,dump 天然不含工具轮;往返明细只靠本函数的【工具轮往返】段呈现。
+             useTools 开着而本轮一次没调工具时,明确写一行,免得用户误以为是"没塞进去"。 */
+          const _rdToolDbgText = () => {
+            const _t = (rdTools.length ? ('【工具调用】\n' + rdTools.map(x => '🔧 ' + x.label + '\n' + x.text).join('\n\n'))
+              : (useTools ? '【工具调用】(本轮未调用任何工具 —— 模型直接用已有上下文作答)' : ''));
+            const _r = (last && Array.isArray(last.toolRaw) && last.toolRaw.length) ? ('【工具轮往返(原始形态,按轮)】\n' + last.toolRaw.map((x, i) => '—— 第 ' + (i + 1) + ' 轮 ——\n【assistant 写了】\n' + x.a + '\n\n【回灌给它】\n' + x.u).join('\n\n')) : ''; // v4.9.390:逐轮原始形态(与上面【工具调用】汇总互为对照)
+            const _d = [_t, _r].filter(Boolean).join('\n\n---\n\n');
+            return (_d ? (_d + '\n\n========== 以下为本次发送给 AI 的 system 与历史 ==========\n\n') : '') + debugCtx;
+          };
           // v4.9.166:中间轮(要调工具的那几轮)的文字不再写进「回答」位 —— 实测现象"流式输出出来、然后又替换成正常的回答"就是它造成的:
           //   旧版每轮都把文字写进同一条消息的 content,下一轮 delta 一到就整段覆盖。
           //   现改为:一旦本轮流里出现调用行(判定为"工具轮"),该轮文字只留在 last.draft(灰色过程位);
           //   轮末再挪进 last.steps —— 两处样式完全相同，视觉上不跳不闪。过程只用于展示,不进历史上下文(历史只取 m.content)。
           let _rdRoundTool = false; // 本轮流里是否已出现调用行
-          /* v4.9.394:流式期间合并渲染(原来每个 delta 都整屏重建，卡);90ms 一次,肉眼仍是"实时"。 */
+          /* v4.9.394:流式期间合并渲染(原来每个 delta 都整屏重建，卡);90ms 一次,肉眼仍是"实时"。
+             v4.9.471:传 true 走"只重画最后一条"的增量快路径(见 chatRender 内说明)—— 冻结的历史消息不再重算。 */
           let _rdPaintT = 0;
           const _rdRenderSoon = () => {
             try {
               if (_rdPaintT) return;
-              _rdPaintT = setTimeout(() => { _rdPaintT = 0; try { chatRender(); } catch (e) {} }, 90);
+              _rdPaintT = setTimeout(() => { _rdPaintT = 0; try { chatRender(true); } catch (e) {} }, 90);
             } catch (e) {}
           };
           /*  v4.9.402(「那个是更新之前已经出回答了的，更新完之后就成那样了」 解释:
@@ -31256,7 +31567,7 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
             if (!last) return;
             const raw = String(content == null ? '' : content);
             if (/\[\[?\s*TOOL\s*[:：]/i.test(raw)) _rdRoundTool = true;
-            if (_rdRoundTool) last.draft = stripToolLines(raw); else last.content = stripToolLines(raw);
+            if (_rdRoundTool) last.draft = keepToolLines(raw); else last.content = stripToolLines(raw); // v4.9.480:工具轮灰块只留调用行(不再展示它自写的伪造工具返回)
             last.thinkingOpen = false; delete last.pending; _rdRenderSoon(); _rdSaveSoon(); // v4.9.402:顺手节流落库，中途刷新也留得住已流出的部分 
           };
           let result = { content: '', thinking: '' };
@@ -31277,24 +31588,25 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
               const calls = Array.from(String(r.content || '').matchAll(/\[\[?\s*TOOL\s*[:：]\s*([A-Za-z_]+)\s*([^\]]*)\]\]?/gi)); // v4.9.138:也接受单方括号 [TOOL:...](模型偶尔少写一个)
               if (!calls.length || round === MAXR - 1) { result = r; if (calls.length && round === MAXR - 1) capped = true; break; } // v4.9.69:到上限时它还想继续查 → 先收尾回答(见下)
               const outs = [];
+              const _uniqCalls = []; // v4.9.480:去重后的调用行 —— 回传给模型的 assistant 消息只留这些,序号与 outs 一一对应
               const _seenCall = {};
               for (const c of calls) {
                 // v4.9.86:同一轮里完全相同的调用只跑一次 —— 模型偶尔把同一行重复写多遍(实测见过 10 行里 5 行重复)
                 const _key = String(c[1] || '').toLowerCase() + '|' + String(c[2] || '').replace(/\s+/g, '').trim();
                 if (_seenCall[_key]) continue;
                 _seenCall[_key] = 1;
+                _uniqCalls.push('[[TOOL:' + c[1] + (String(c[2] || '').trim() ? ' ' + String(c[2]).trim() : '') + ']]');
                 const ex = await rdExecTool(c[1], c[2]); outs.push(ex); rdTools.push(ex);
               }
               if (!outs.length) { result = r; break; } // v4.9.86:本轮调用全是重复 → 不再回灌,直接采用当前回答
               if (outs.some(o => o.spoiler)) { spoilerUsed = true; if (last) last.spoiler = true; } // v4.9.106:立刻写入标记(渲染在末尾统一补)
               if (last) {
-                // v4.9.166:本轮是工具轮，把它的"前言"从草稿挪进灰字过程块(同一套样式,所以视觉上只是留在原地)
-                const _dr = String(last.draft || '').trim();
-                if (_dr) last.steps = (Array.isArray(last.steps) ? last.steps : []).concat([_dr]);
+                // v4.9.481:工具轮的过程草稿不再并入灰块 —— 它与下面的工具卡完全重复(且行尾常挂着模型自造的杂文);
+                //   流式期间仍实时可见它写的调用行,落定后灰块消失、只留工具卡。
                 last.draft = '';
                 last.toolNotes = rdTools.slice(); chatRender();
               }
-              reqMsgs.push({ role: 'assistant', content: String(r.content || '') });
+              reqMsgs.push({ role: 'assistant', content: _uniqCalls.join('\n') || '(已发起工具检索)' }); // v4.9.480:只回灌调用行,剥掉它自写的伪造工具返回(空则占位,免得某些服务商拒收空消息)
               // v4.9.87:回灌瘦身 —— 去掉与模型刚写过的调用行重复的 label(改用序号对齐,去重跳过时也不会错位),收尾语压到十几字
               try {
                 if (last) {
@@ -31304,6 +31616,8 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
                   }]);
                 }
               } catch (e) {}
+              // v4.9.483:每记完一轮工具往返就把 ctxDebug 写一次 —— 之后即使本轮出错/被中止,工具段也不会丢
+              if (last) last.ctxDebug = _rdToolDbgText();
               reqMsgs.push({ role: 'user', content: '【工具结果】\n' + outs.map((o, oi) => (oi + 1) + ') ' + o.text).join('\n\n') + '\n\n需要再查就再写一行调用,否则直接回答。' });
             }
             // v4.9.156:撞到轮次上限、而它还想再查 → 再要一次「收尾回答」(1 次请求,明确禁止再写调用行)。
@@ -31311,7 +31625,7 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
             if (capped) {
               try {
                 _rdRoundTool = false; // v4.9.166:收尾回答里禁止调用行，它的文字就是回答,别落进过程位
-                reqMsgs.push({ role: 'assistant', content: String(result.content || '').trim() || '(已发起工具检索)' }); // 内容为空时给个占位,免得某些服务商拒收空消息
+                reqMsgs.push({ role: 'assistant', content: keepToolLines(result.content) || '(已发起工具检索)' }); // v4.9.480:只留调用行(剥掉它自写的伪造工具返回);空则给占位,免得某些服务商拒收空消息
                 reqMsgs.push({ role: 'user', content: '【系统】工具调用已达上限(' + MAXR + ' 轮),不要再写任何调用行 —— 请立刻用你已经查到的资料直接回答我的问题;资料不足以确定的部分,就明确说"文中未提到 / 不确定"。' });
                 const r2 = await chatAIStream(cfg, buildBody(reqMsgs), onThink, onContent);
                 // v4.9.256(⑦①):"收尾回答"那一轮同样可能被中止 —— 有流出内容就留下,并标「已中止」
@@ -31358,8 +31672,11 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
               } catch (e) { last.thinking = result.thinking; }
             }
             if (spoilerUsed) last.spoiler = true; // v4.9.103:本轮参考了后续章节 → 渲染时盖黑幕(hint 档)
-            last.ctxDebug = debugCtx + (rdTools.length ? ('\n\n---\n\n【工具调用】\n' + rdTools.map(t => '🔧 ' + t.label + '\n' + t.text).join('\n\n')) : '') +
-              ((Array.isArray(last.toolRaw) && last.toolRaw.length) ? ('\n\n---\n\n【工具轮往返(原始形态,按轮)】\n' + last.toolRaw.map((x, i) => '—— 第 ' + (i + 1) + ' 轮 ——\n【assistant 写了】\n' + x.a + '\n\n【回灌给它】\n' + x.u).join('\n\n')) : ''); // v4.9.390:逐轮原始形态(上面【工具调用】是汇总,这里是与实际发送一致的往返)
+            /* v4.9.483:改用统一函数 _rdToolDbgText() —— 原来只在这里(成功末尾)拼一次,
+               本轮若中途出错/被中止,last.ctxDebug 就停在发送前的快照(只有 system+历史、没有工具往返),
+               「🔍 上下文」里于是永远看不到工具段(用户实测反馈"根本没塞进去")。现已改为工具轮内每轮都写。
+               这段保留作兜底:第 1 轮就没调工具、或末轮收尾时,由它把 ctxDebug 落成最终形态。 */
+            last.ctxDebug = _rdToolDbgText();
             // v4.9.106/113:标记与上下文都写完之后再渲染并保存一次 —— 顺序反了的话界面会停在没有黑幕、也没有工具结果的旧版本(两次都实测踩过)
             /* v4.9.403: delete last.pending 必须挪到落库之前 —— 原来"先存后删"，存下去的那版永远带 pending，重开显示「思考中…」 */
             delete last.pending;
@@ -34076,7 +34393,8 @@ const BP_CHAT_SYS_DEFAULT = '你是轻小说阅读助手。根据用户提供的
     '.rd-aichat-msg .rd-aichat-thinking.open .think-arrow{transform:rotate(90deg);}' +
     '.rd-aichat-msg .rd-aichat-ctx{margin-top:6px;padding:6px 8px;background:rgba(0,0,0,.03);border:1px solid var(--rd-border);border-radius:6px;font-size:12px;color:var(--rd-muted);}' +
     '.rd-aichat-msg .rd-aichat-ctx .ctx-head{display:flex;align-items:center;gap:4px;font-weight:600;cursor:pointer;}' +
-    '.rd-aichat-msg .rd-aichat-ctx .ctx-body{margin-top:4px;white-space:pre-wrap;word-break:break-word;display:none;max-height:300px;overflow-y:auto;}' +
+    /* v4.9.481:小框 300px → 600px —— 工具往返明细已挪到 ctxDebug 最前面,这里放宽一屏能看到更多(原来 300px 时用户实测"看不见") */
+    '.rd-aichat-msg .rd-aichat-ctx .ctx-body{margin-top:4px;white-space:pre-wrap;word-break:break-word;display:none;max-height:600px;overflow-y:auto;}' +
     '.rd-aichat-msg .rd-aichat-ctx.open .ctx-body{display:block;}' +
     '.rd-aichat-msg .rd-aichat-ctx .ctx-arrow{transition:transform .2s;}' +
     '.rd-aichat-msg .rd-aichat-ctx.open .ctx-arrow{transform:rotate(90deg);}';
